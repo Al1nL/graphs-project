@@ -1,0 +1,20 @@
+{
+  "_comment": "Graphormer config: PE=none, dataset=pascalvoc-sp. Args mirror Graphormer's fairseq-cli flags (github.com/microsoft/Graphormer), collected here as JSON for the harness's own bookkeeping -- translate to CLI flags in the actual fairseq-cli call.",
+  "out_dir": "results/raw/graphormer_none_pascalvoc-sp",
+  "dataset_name": "pascalvoc-sp",
+  "seed_placeholder": "set via --seed on CLI wrapper",
+  "num_layers": 8,
+  "embed_dim": 80,
+  "ffn_embed_dim": 80,
+  "attention_heads": 8,
+  "dropout": 0.1,
+  "attention_dropout": 0.1,
+  "max_epoch": 200,
+  "lr": 0.0002,
+  "warmup_updates": 6000,
+  "centrality_encoding": true,
+  "spatial_encoding": false,
+  "edge_encoding": false,
+  "extra_node_pe": null,
+  "pe_cache": "cache/pascalvoc-sp/{split}_pe.pt"
+}

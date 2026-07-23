@@ -1,0 +1,51 @@
+# GraphGPS config: PE=none, dataset=peptides-func
+# Base template follows GraphGPS's own configs/GPS/*.yaml structure (GraphGym format).
+out_dir: results/raw/gps_none_peptides-func
+dataset:
+  format: PyG-LRGBDataset
+  name: peptides-func
+  task: classification_multilabel
+  task_type: ap
+  node_encoder: True
+  node_encoder_name: LinearNode+none
+  edge_encoder: True
+  edge_encoder_name: LinearEdge
+train:
+  mode: custom
+  batch_size: 32
+  eval_period: 1
+  ckpt_period: 20
+model:
+  type: GPSModel
+  loss_fun: cross_entropy
+gt:
+  layer_type: CustomGatedGCN+Transformer
+  layers: 10
+  n_heads: 4
+  dim_hidden: 96
+  dropout: 0.1
+  attn_dropout: 0.5
+posenc_LapPE:
+  enable: False
+  dim_pe: 16
+  model: DeepSet
+  precomputed_cache: cache/peptides-func/{split}_pe.pt
+posenc_RWSE:
+  enable: False
+  dim_pe: 20
+  precomputed_cache: cache/peptides-func/{split}_pe.pt
+posenc_SignNet:
+  enable: False
+  dim_pe: 32
+  precomputed_cache: cache/peptides-func/{split}_pe.pt
+custom_attn_bias:
+  enable: False
+  source: grpe
+  precomputed_cache: cache/peptides-func/{split}_pe.pt
+optim:
+  optimizer: adamW
+  base_lr: 0.0005
+  max_epoch: 200
+  scheduler: cosine_with_warmup
+  num_warmup_epochs: 10
+seed_placeholder: "set via --seed on CLI wrapper, not hardcoded here"

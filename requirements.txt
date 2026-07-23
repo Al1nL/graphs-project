@@ -1,0 +1,15 @@
+# Shared harness dependencies. Each backbone (GraphGPS / SAN / Graphormer) additionally
+# needs its OWN pinned environment -- see README "Environment setup". Do not install all
+# three backbones' requirements into a single env; they conflict (esp. PyG / DGL / fairseq
+# versions). This file only covers src/pe, src/sensitivity.py, and src/run_experiment.py's
+# shared orchestration code.
+
+torch>=2.1,<2.4
+torch-geometric>=2.4
+numpy>=1.24
+scipy>=1.10
+networkx>=3.1
+pandas>=2.0
+pyyaml>=6.0
+tqdm>=4.66
+matplotlib>=3.7
