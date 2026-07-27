@@ -221,6 +221,134 @@ def average_curves(curves: List[Dict[int, Dict[str, float]]]) -> Dict[int, Dict[
     return {d: {"mean": sums[d] / counts[d], "count": counts[d]} for d in sorted(sums)}
 
 
+# ---------------------------------------------------------------------------
+# Scale-free summaries of a curve
+# ---------------------------------------------------------------------------
+# Raw s_bar(d) is NOT comparable across backbones. Model it as
+#
+#       s_bar(d) ~= C * f(d)
+#
+# where C is an overall gain and f is the decay shape. The scientific claim is
+# about f, but the raw curve reports the product, and C absorbs weight init
+# scale, LayerNorm-vs-BatchNorm placement, residual scaling, depth and hidden
+# width -- none of which are the PE. A backbone with 10x the gain "wins" at
+# every d regardless of how fast it decays.
+#
+# We therefore report three things, in increasing order of authority:
+#   raw s_bar(d)                     -- appendix; reproducibility, and it exposes
+#                                       vanishing/exploding pathologies that
+#                                       ratios hide
+#   s_tilde(d) = s_bar(d)/s_bar(1)   -- secondary; divides out C, but anchors on
+#                                       a single architecture-loaded point (d=1
+#                                       is where GraphGPS's GatedGCN branch
+#                                       dominates and where Graphormer has no
+#                                       message-passing branch at all), and its
+#                                       noise propagates into every other point
+#   rho                              -- PRIMARY; a ratio of sums, so C cancels
+#                                       exactly and algebraically
+#
+# Why rho rather than fitting s_bar(d) ~ exp(-lambda*d) and ranking by lambda:
+# GT decay curves flatten, because global attention supplies a distance-
+# independent floor. Fitting an exponential to a decay-then-flat curve yields a
+# lambda dominated by the early hops, and the fitted parameter then describes
+# the misspecification rather than the data. rho assumes no functional form --
+# it is a nonparametric tail-mass statistic, the ECDF-tail analogue for curves.
+
+
+def normalized_curve(curve: Dict[int, Dict[str, float]], anchor: int = 1) -> Dict[int, float]:
+    """s_tilde(d) = s_bar(d) / s_bar(anchor). Secondary statistic -- see note above."""
+    curve = {int(d): rec for d, rec in curve.items()}
+    if anchor not in curve:
+        raise KeyError(f"anchor d={anchor} not populated; buckets present: {sorted(curve)}")
+    a = curve[anchor]["mean"]
+    if a == 0:
+        raise ZeroDivisionError(f"s_bar({anchor}) == 0; cannot normalize")
+    return {d: rec["mean"] / a for d, rec in sorted(curve.items())}
+
+
+def long_range_fraction(
+    curve: Dict[int, Dict[str, float]],
+    d_min: int,
+    d_max: int,
+    weight_by_count: bool = False,
+) -> float:
+    """rho = sum_{d >= d_min} s_bar(d) / sum_{d >= 1} s_bar(d), both truncated at d_max.
+
+    PRIMARY statistic: scale-free, one number per cell, directly rankable, and robust to
+    the fact that GT curves are often not exponential.
+
+    rho is only comparable across cells when (d_min, d_max) are IDENTICAL -- it is a
+    property of the pair (curve, window), not of the curve alone. Always report the window
+    next to the number, and see docs/analysis-plan.md for the values in force.
+
+    `weight_by_count` picks which question rho answers:
+      False (default) -- each DISTANCE contributes equally: rho describes the curve's
+                         SHAPE, and is sensitive to the tail, which is the point.
+      True            -- each PAIR contributes equally: rho describes actual information
+                         flow in a typical graph, and is dominated by the mid-range
+                         buckets where most pairs live.
+    Either is defensible and neither confounds the comparison (the distance distribution
+    is a property of the dataset, identical across PEs and backbones), but they give
+    different numbers, so the choice must be stated rather than left implicit.
+
+    Buckets with no sampled pairs are skipped, contributing to neither sum.
+    """
+    if d_min < 1 or d_max < d_min:
+        raise ValueError(f"need 1 <= d_min <= d_max, got d_min={d_min}, d_max={d_max}")
+    num = den = 0.0
+    for d, rec in curve.items():
+        d = int(d)
+        if not 1 <= d <= d_max:
+            continue
+        val = rec["mean"] * (rec["count"] if weight_by_count else 1.0)
+        den += val
+        if d >= d_min:
+            num += val
+    return num / den if den > 0 else float("nan")
+
+
+def bootstrap_over_graphs(
+    per_graph_curves: List[Dict[int, Dict[str, float]]],
+    stat_fn: Callable[[Dict[int, Dict[str, float]]], float],
+    n_boot: int = 1000,
+    ci: float = 0.95,
+    seed: int = 0,
+):
+    """Point estimate and confidence interval for a curve statistic, CLUSTERED BY GRAPH.
+
+    Resamples whole graphs with replacement, re-pools, and recomputes the statistic.
+
+    This is the part that survives review. Node pairs within one graph are NOT
+    independent -- they share a model and a topology, and their paths overlap -- so
+    treating ~50,000 sampled pairs as 50,000 independent observations understates the
+    standard error badly. Resampling at the level of the independent unit (the graph)
+    gives n = number of sampled graphs, which is smaller, honest, and immune to the
+    "your error bars assume independence you don't have" objection.
+
+    Returns (point, lo, hi); lo/hi are NaN if fewer than 2 graphs are supplied.
+    """
+    if not per_graph_curves:
+        return float("nan"), float("nan"), float("nan")
+    point = stat_fn(average_curves(per_graph_curves))
+    n_graphs = len(per_graph_curves)
+    if n_graphs < 2:
+        return point, float("nan"), float("nan")
+
+    rng = torch.Generator().manual_seed(seed)
+    vals = []
+    for _ in range(n_boot):
+        idx = torch.randint(n_graphs, (n_graphs,), generator=rng).tolist()
+        v = stat_fn(average_curves([per_graph_curves[i] for i in idx]))
+        if v == v:  # drop NaN
+            vals.append(v)
+    if len(vals) < 2:
+        return point, float("nan"), float("nan")
+    vals.sort()
+    lo_i = int((1 - ci) / 2 * len(vals))
+    hi_i = min(len(vals) - 1, int((1 + ci) / 2 * len(vals)))
+    return point, vals[lo_i], vals[hi_i]
+
+
 def assert_shared_width(widths_by_pe: Dict[str, int]) -> int:
     """Guard for the input-space contract: every PE variant must be probed on the same
     input width. Call this once per (backbone, dataset) before the grid runs.

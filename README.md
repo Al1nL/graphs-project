@@ -47,15 +47,36 @@ lrgb_pe_project/
 │   │   ├── graphgps_adapter.py   <- maps PE tensors -> GraphGPS posenc_* config/format
 │   │   ├── san_adapter.py        <- maps PE tensors -> SAN's LPE input format
 │   │   └── graphormer_adapter.py <- maps PE tensors -> Graphormer spatial_pos/edge_input/attn-bias
-│   ├── sensitivity.py            <- backbone-agnostic Jacobian long-range sensitivity s̄(d)
+│   ├── sensitivity.py            <- backbone-agnostic Jacobian long-range sensitivity s̄(d),
+│   │                                plus the scale-free summaries (s̃(d), ρ) and the
+│   │                                graph-clustered bootstrap
 │   └── run_experiment.py         <- single entry point: --backbone --pe --dataset --seed
 ├── configs/
 │   ├── graphgps/                 <- 15 GraphGym YAML configs (5 PE x 3 datasets)
 │   ├── san/                      <- 15 JSON configs (SAN's own config format)
 │   └── graphormer/               <- 15 JSON configs (fairseq-style args)
+├── docs/
+│   └── analysis-plan.md          <- amended success criteria + pre-registered ρ windows.
+│                                    Dated BEFORE any results exist; read this first.
+├── tests/                        <- pins the probe against a brute-force Jacobian.
+│                                    torch + networkx only; no GPU, dataset, or backbone.
 ├── scripts/
-│   └── run_all.sh                <- loops over the full 3 x 5 x 3 grid, 3 seeds each
+│   ├── run_all.sh                <- loops over the full 3 x 5 x 3 grid, 3 seeds each
+│   └── aggregate_results.py      <- Table 1 + figures; ρ is the primary statistic
 └── results/                      <- EMPTY. Filled by run_experiment.py after real runs.
+```
+
+## Reporting the sensitivity results
+
+Raw s̄(d) is **not** comparable across backbones — it conflates decay *shape* with overall
+*gain*, and gain is set by LayerNorm placement, residual scaling, depth and width rather
+than by the PE. Rank cells on **ρ**, the long-range mass fraction; it is a ratio of sums,
+so the gain cancels exactly. Raw curves stay in the appendix. The full argument and the
+amended proposal success criteria are in `docs/analysis-plan.md`.
+
+```bash
+python -m pytest tests/                     # or: python tests/test_sensitivity.py
+python scripts/aggregate_results.py         # --d-min/--d-max to test window sensitivity
 ```
 
 ## The 5 PE variants (unchanged from proposal, now computed once and shared)

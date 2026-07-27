@@ -147,6 +147,15 @@ def main():
         "n_shared_feats": None,         # <-- FILL AFTER RUN: input width the Jacobian was
                                         #     taken over; must match across all 5 PE variants
         "sensitivity_curve": {},        # <-- FILL AFTER RUN: {hop_distance: {"mean":, "count":}}
+                                        #     pooled over sampled graphs via average_curves
+        "sensitivity_curves_per_graph": [],
+        # ^ FILL AFTER RUN: one curve per sampled test graph, same shape as above.
+        #   REQUIRED for error bars: rho's confidence interval is a bootstrap that
+        #   resamples whole GRAPHS, because node pairs within a graph are not independent.
+        #   Without this list, aggregate_results.py can only report rho as a point estimate
+        #   with no way to distinguish a real gap from sampling noise. It also lets the rho
+        #   window (d_min, d_max) be varied at analysis time without re-running the probe --
+        #   which matters, since that window is still provisional (see docs/analysis-plan.md).
         "status": "NOT_RUN — training stub not wired to a cloned backbone repo yet",
     }
     with open(out_path, "w") as f:
