@@ -78,6 +78,36 @@ def graphormer_train(config, dataset, seed):
 TRAIN_FN = {"gps": graphgps_train, "san": san_train, "graphormer": graphormer_train}
 
 
+def make_model_fn(trained_model, backbone: str, data, pe_record):
+    """Wrap a trained backbone into the `model_fn(x) -> [n, p]` callable that
+    src/sensitivity.py's probe expects.
+
+    Two requirements, both load-bearing for the PE comparison (see the input-space
+    contract at the top of sensitivity.py):
+
+    1. `x` must be laid out as [shared_original_features | PE channels], with the shared
+       channels FIRST, or the PE must not be in `x` at all -- reach it via closure over
+       `pe_record` instead. The probe differentiates only the leading `n_shared_feats`
+       columns so that all five PE variants are measured on an identical input space;
+       that slice is meaningless if PE channels are interleaved.
+    2. `n_shared_feats` must be the SAME integer for all five PE variants on a given
+       dataset. Derive it from the raw (un-augmented) dataset's feature width rather than
+       hardcoding it, and run `sensitivity.assert_shared_width` over the five variants
+       once before launching the grid.
+
+    Return the final-layer NODE embeddings [n, p] -- not pooled graph embeddings, and not
+    task logits: s_bar(d) is defined on h_v^(L).
+    """
+    raise NotImplementedError(
+        "Implement per backbone once its repo is cloned: run the trained model's forward "
+        "pass up to (and excluding) the task head, returning node embeddings. For GraphGPS "
+        "this is the GPSModel layer stack before `post_mp`; for SAN, the output of the "
+        "final SAN layer before readout; for Graphormer, the last encoder layer's token "
+        "states with the virtual/graph token dropped. See make_model_fn's docstring for "
+        "the two constraints the wrapper must satisfy."
+    )
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--backbone", required=True, choices=BACKBONES)
@@ -114,7 +144,9 @@ def main():
         "num_params": None,             # <-- FILL AFTER RUN: trainable parameter count
         "train_time_seconds": None,     # <-- FILL AFTER RUN
         "peak_gpu_mem_mb": None,        # <-- FILL AFTER RUN
-        "sensitivity_curve": {},        # <-- FILL AFTER RUN: {hop_distance: mean_jacobian_norm}
+        "n_shared_feats": None,         # <-- FILL AFTER RUN: input width the Jacobian was
+                                        #     taken over; must match across all 5 PE variants
+        "sensitivity_curve": {},        # <-- FILL AFTER RUN: {hop_distance: {"mean":, "count":}}
         "status": "NOT_RUN — training stub not wired to a cloned backbone repo yet",
     }
     with open(out_path, "w") as f:

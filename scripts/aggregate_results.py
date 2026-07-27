@@ -67,7 +67,12 @@ def plot_sensitivity_curves(records, out_dir="results"):
     for dataset, recs in by_dataset.items():
         plt.figure(figsize=(7, 5))
         for r in recs:
-            curve = {int(k): v for k, v in r["sensitivity_curve"].items()}
+            # sensitivity.py returns {d: {"mean": ..., "count": ...}}; tolerate the older
+            # flat {d: mean} shape so pre-existing result files still plot.
+            curve = {
+                int(k): (v["mean"] if isinstance(v, dict) else v)
+                for k, v in r["sensitivity_curve"].items()
+            }
             xs = sorted(curve.keys())
             ys = [curve[x] for x in xs]
             plt.plot(xs, ys, marker="o", label=f"{r['backbone']}-{r['pe']}")
