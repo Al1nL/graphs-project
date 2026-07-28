@@ -23,10 +23,12 @@ dense feature-level PEs like LapPE/RWSE/SignNet-PE.
   model doesn't have, so again reported with its own parameter count.
 """
 
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from dataset_meta import SPD_NUM_BUCKETS  # noqa: E402
+
 import torch
 import torch.nn as nn
-
-SPD_CAP = 20
 
 
 def build_graphormer_config(pe_name: str, cache_dir: str) -> dict:
@@ -46,12 +48,12 @@ def build_graphormer_config(pe_name: str, cache_dir: str) -> dict:
     raise ValueError(f"Unknown pe_name: {pe_name}")
 
 
-def collate_spatial_and_edge(spd: torch.Tensor, edge_type_id: torch.Tensor, spd_cap=SPD_CAP):
+def collate_spatial_and_edge(spd_bucket: torch.Tensor, edge_type_id: torch.Tensor):
     """Graphormer's data collator expects `spatial_pos` (n x n long, clamped) and
     `edge_input` (n x n x path_len x edge_feat, here simplified to a single categorical
     edge-type id per pair since LRGB edge features are scalar weights, not multi-hop
     bond paths as in the original molecular-graph setting)."""
-    spatial_pos = spd.clamp(max=spd_cap)
+    spatial_pos = spd_bucket  # pre-bucketed upstream; see src/dataset_meta.py
     edge_input = edge_type_id.unsqueeze(-1)  # [n, n, 1] -- single "path step" placeholder
     return spatial_pos, edge_input
 

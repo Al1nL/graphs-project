@@ -149,7 +149,13 @@ def main():
         "sensitivity_curve": {},        # <-- FILL AFTER RUN: {hop_distance: {"mean":, "count":}}
                                         #     pooled over sampled graphs via average_curves
         "sensitivity_curves_per_graph": [],
-        # ^ FILL AFTER RUN: one curve per sampled test graph, same shape as above.
+        # ^ FILL AFTER RUN: one entry per sampled test graph, shaped
+        #     {"curve": {d: {"mean":, "count":}}, "diameter": int, "num_nodes": int}
+        #   `diameter` (sensitivity.graph_diameter) is REQUIRED for the relative-distance
+        #   axis: it rebins each graph onto d/diam(G) so rho is comparable ACROSS datasets
+        #   whose diameters differ ~2x, and so far buckets are not dominated by whichever
+        #   graphs happen to be large enough to have them. Without it only absolute rho
+        #   can be computed, and that is within-dataset only.
         #   REQUIRED for error bars: rho's confidence interval is a bootstrap that
         #   resamples whole GRAPHS, because node pairs within a graph are not independent.
         #   Without this list, aggregate_results.py can only report rho as a point estimate

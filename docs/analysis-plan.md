@@ -161,7 +161,78 @@ rather than denser sampling; and a saturated *reference* rung is flagged as a ba
 
 ---
 
-## Open decision — the ρ window is provisional
+## Amendment 5 — the distance axis, and the GRPE bucketing decision (2026-07-28)
+
+This resolves the open decision recorded below, which is retained for the record.
+
+### 5a. `max_dist` is per dataset
+
+Peptides has an average diameter of 57; capping the probe at 20 measured roughly its first
+third, on the dataset chosen precisely because it has long range. `max_dist` now comes from
+`src/dataset_meta.py`: **40** for Peptides-func/struct, **28** for PascalVOC-SP.
+
+Not the full diameter, deliberately: buckets past ~40 are supported by a shrinking minority
+of graphs, so they cost compute for measurements that are both noisy and unrepresentative.
+
+### 5b. Two axes, two jobs
+
+| Axis | Window | Role |
+|---|---|---|
+| absolute `d` | per dataset — (20, 40) Peptides, (10, 28) VOC-SP | primary **within** a dataset; the axis over-squashing theory (ref [7]) is stated in |
+| relative `d/diam(G)` | bins 6–10 of 10, i.e. `d/diam > 0.5`, shared | primary **across** datasets; the axis ρ is ranked on |
+
+Absolute ρ is deliberately *not* comparable across datasets, because the windows differ.
+That is what the relative axis is for.
+
+Relative rebinning is a **post-hoc transform** (`sensitivity.to_relative_curve`) over stored
+per-graph curves, so the axis can be changed at analysis time without re-probing. It
+requires each graph's diameter in the result JSON.
+
+### 5c. The population-shift problem
+
+A bucket at `d=50` can only contain pairs from graphs whose diameter is ≥ 50, so as `d`
+grows the **subpopulation of graphs being averaged silently changes**. A curve that flattens
+far out may show genuine long-range flow, or may only show that big graphs are all that
+remain there — and big graphs behave differently. `average_curves` now records `n_graphs`
+per bucket, and the summary table carries `min_graphs_in_tail_bucket`, so the shift is
+visible rather than assumed away. The relative axis largely normalises it.
+
+### 5d. GRPE's bias table — the coupled model decision
+
+Measuring to `d=40` while GRPE's bias table capped at 20 would have made GRPE's tail
+behaviour **an artefact of our cap rather than a property of the encoding** — and GRPE is
+one of the five arms being ranked, so that would have corrupted the headline result in a
+direction that looks like a finding.
+
+- **Rejected — keep the cap at 20 and document.** Leaves a known handicap on one of five
+  arms in exactly the range the paper is about.
+- **Rejected — raise the cap to 40.** Doubles the table and starves the far buckets, which
+  would see very few training examples on chain-like peptides.
+- **Adopted — T5-style bucketing.** Exact buckets for `d ≤ 8` where pairs are dense,
+  logarithmically widening buckets to a horizon of 128, plus a dedicated **unreachable**
+  bucket. 24 buckets total: fine resolution where it matters, real coverage in the tail, a
+  smaller table than raising the cap.
+
+This is a **model** change and requires re-training every GRPE cell. It is free now because
+no results exist; it would not have been later.
+
+Two bugs fixed alongside it, both of which silently corrupted the GRPE arm:
+
+1. **Unreachable pairs were indistinguishable from far ones.** `spd` was initialised to the
+   cap and BFS ran with `cutoff=cap`, so a pair in a different connected component and a
+   pair at distance ≥ cap received the same value. GRPE learned one bias meaning "far *or*
+   disconnected" — two different structural relations collapsed into one parameter.
+2. **The cap was destructive at cache time**, so changing the model's distance resolution
+   required recomputing the entire PE cache rather than editing a config. Raw distances are
+   now stored uncapped and bucketed at model-input time.
+
+The constant previously appeared in five places meaning two different things (a measurement
+cap and a model parameter); `src/dataset_meta.py` is now the single source of truth, and
+`test_no_hardcoded_caps_remain_in_src` guards against regression.
+
+---
+
+## Superseded — the ρ window was provisional (resolved by Amendment 5)
 
 `ρ` is a property of the pair (curve, window), not of the curve alone. It is only
 comparable across cells when `(d_min, d_max)` are identical, so the window in force must

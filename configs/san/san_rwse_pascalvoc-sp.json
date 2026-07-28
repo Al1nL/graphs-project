@@ -30,7 +30,7 @@
     "signnet_replaces_lpe": false,
     "extra_node_feat": "rwse",
     "grpe_bias_enable": false,
-    "grpe_spd_cap": 20
+    "grpe_num_spd_buckets": 24
   },
   "pe_cache": "cache/pascalvoc-sp/{split}_pe.pt"
 }

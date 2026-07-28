@@ -19,6 +19,10 @@ not present in the original paper -- flagged in the report as an adaptation, not
 faithful ablation.
 """
 
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from dataset_meta import SPD_NUM_BUCKETS  # noqa: E402
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -69,22 +73,24 @@ class GRPEBiasedAttention(nn.Module):
     and comparable (relevant for the "#Param." column in the results table).
     """
 
-    def __init__(self, dim, num_heads, spd_cap=20, num_edge_types=2):
+    def __init__(self, dim, num_heads, num_spd_buckets=SPD_NUM_BUCKETS, num_edge_types=2):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.qkv = nn.Linear(dim, 3 * dim)
         self.out_proj = nn.Linear(dim, dim)
-        self.b_spd = nn.Parameter(torch.zeros(num_heads, spd_cap + 1))
+        self.b_spd = nn.Parameter(torch.zeros(num_heads, num_spd_buckets))
         self.b_edge = nn.Parameter(torch.zeros(num_heads, num_edge_types))
 
-    def forward(self, x, spd, edge_type_id, attn_mask=None):
+    def forward(self, x, spd_bucket, edge_type_id, attn_mask=None):
         n, d = x.shape
         qkv = self.qkv(x).reshape(n, 3, self.num_heads, self.head_dim).permute(1, 2, 0, 3)
         q, k, v = qkv[0], qkv[1], qkv[2]  # [heads, n, head_dim]
         scores = torch.einsum("hid,hjd->hij", q, k) / (self.head_dim ** 0.5)
-        spd_clamped = spd.clamp(max=self.b_spd.shape[1] - 1)
-        scores = scores + self.b_spd[:, spd_clamped]        # broadcast over heads
+        # spd_bucket comes pre-bucketed from the PE cache (dataset_meta.spd_bucket_id):
+        # exact for d<=8, log-spaced beyond, with a dedicated unreachable bucket. No
+        # clamping here -- clamping was what collapsed the tail into one bias.
+        scores = scores + self.b_spd[:, spd_bucket]         # broadcast over heads
         scores = scores + self.b_edge[:, edge_type_id]
         if attn_mask is not None:
             scores = scores.masked_fill(~attn_mask, float("-inf"))

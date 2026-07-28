@@ -38,35 +38,37 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
+from dataset_meta import (  # noqa: E402
+    DATASETS,
+    REL_BINS,
+    REL_RHO_WINDOW,
+    abs_rho_window,
+)
 from sensitivity import (  # noqa: E402
     average_curves,
     bootstrap_over_graphs,
     long_range_fraction,
     normalized_curve,
+    to_relative_curve,
 )
 
 # ---------------------------------------------------------------------------
-# rho windows (d_min, d_max), per dataset.
+# rho windows. Two axes, two jobs (src/dataset_meta.py has the full argument):
 #
-# PROVISIONAL -- these are the values in force as of docs/analysis-plan.md and they are
-# the weakest part of this script. Two known problems, both resolved by fix 3:
+#   ABSOLUTE d -- per-dataset windows, since the datasets' diameters differ by 2x
+#     (Peptides ~57, PascalVOC-SP ~27). Primary WITHIN a dataset; this is the axis that
+#     connects to over-squashing theory, which is stated in absolute hops. NOT comparable
+#     across datasets, precisely because the windows differ.
 #
-#   * d_max = 20 truncates Peptides at roughly the first third of its range (average
-#     diameter 57), so "rho over d in [5,20]" is a MID-range statistic wearing a
-#     long-range label.
-#   * d_min = 5 is not "long range" for a diameter-57 graph -- it captures most of the
-#     curve's mass. The cutoff should be defined RELATIVE to diameter (e.g. 0.5*diam),
-#     which also puts the three datasets on a common axis and makes rho comparable
-#     across them rather than only within one.
+#   RELATIVE d/diam(G) -- one shared window (top half of each graph's diameter) after
+#     rebinning each per-graph curve. Primary ACROSS datasets, and largely immune to the
+#     population shift that makes far absolute buckets draw only from the biggest graphs.
+#     Requires per-graph curves with diameters recorded.
 #
-# rho is a property of the pair (curve, window), so whatever lands here must be reported
-# alongside every rho in the paper. Override at the CLI to check sensitivity to the choice.
+# rho is a property of the pair (curve, window), so the window in force is written into
+# every row of the summary table. Override at the CLI to test sensitivity to the choice.
 # ---------------------------------------------------------------------------
-RHO_WINDOW = {
-    "peptides-func": (5, 20),
-    "peptides-struct": (5, 20),
-    "pascalvoc-sp": (5, 20),
-}
+RHO_WINDOW = {ds: abs_rho_window(ds) for ds in DATASETS}
 DEFAULT_WINDOW = (5, 20)
 
 METRIC_HIGHER_IS_BETTER = {"ap": True, "macro_f1": True, "mae": False}
@@ -94,8 +96,20 @@ def _as_curve(raw):
 
 
 def _per_graph_curves(record):
-    raw = record.get("sensitivity_curves_per_graph")
-    return [_as_curve(c) for c in raw] if raw else []
+    """Per-graph curves as (curve, diameter) pairs.
+
+    Accepts both the current schema -- {"curve": {...}, "diameter": int} -- and a bare
+    curve dict from before diameters were recorded. Without a diameter a graph cannot be
+    rebinned onto the relative axis, so it contributes to absolute rho only; `diameter`
+    is None in that case rather than guessed.
+    """
+    out = []
+    for entry in record.get("sensitivity_curves_per_graph") or []:
+        if isinstance(entry, dict) and "curve" in entry:
+            out.append((_as_curve(entry["curve"]), entry.get("diameter")))
+        else:
+            out.append((_as_curve(entry), None))
+    return out
 
 
 def build_summary_table(records, n_boot, weight_by_count, out_dir="results"):
@@ -137,13 +151,36 @@ def build_summary_table(records, n_boot, weight_by_count, out_dir="results"):
             )
             row["max_d_populated"] = max(pooled)
 
-            if cell["per_graph"]:
-                _, lo, hi = bootstrap_over_graphs(cell["per_graph"], stat, n_boot=n_boot)
+            # population-shift diagnostic: how many graphs actually back the tail buckets
+            tail_graphs = [b.get("n_graphs", 0) for d, b in pooled.items() if d >= d_min]
+            row["min_graphs_in_tail_bucket"] = min(tail_graphs) if tail_graphs else 0
+            row["graphs_at_d1"] = pooled.get(1, {}).get("n_graphs", 0)
+
+            abs_curves = [c for c, _ in cell["per_graph"]]
+            if abs_curves:
+                _, lo, hi = bootstrap_over_graphs(abs_curves, stat, n_boot=n_boot)
                 row["rho_ci_lo"], row["rho_ci_hi"] = lo, hi
-                row["n_graphs"] = len(cell["per_graph"])
+                row["n_graphs"] = len(abs_curves)
             else:
                 row["rho_ci_lo"] = row["rho_ci_hi"] = float("nan")
                 row["n_graphs"] = 0
+
+            # RELATIVE-axis rho: rebin each graph onto d/diam(G) deciles, then pool. This
+            # is the cross-dataset-comparable number; absolute rho is not, because the
+            # absolute windows differ per dataset by design.
+            rel = [to_relative_curve(c, dia, REL_BINS)
+                   for c, dia in cell["per_graph"] if dia]
+            rel = [c for c in rel if c]
+            if rel:
+                b_lo, b_hi = REL_RHO_WINDOW
+                rstat = lambda c: long_range_fraction(c, b_lo, b_hi, weight_by_count)  # noqa: E731
+                r_rho, r_lo, r_hi = bootstrap_over_graphs(rel, rstat, n_boot=n_boot)
+                row["rho_rel"], row["rho_rel_ci_lo"], row["rho_rel_ci_hi"] = r_rho, r_lo, r_hi
+                row["rho_rel_window"] = f"bins {b_lo}-{b_hi} of {REL_BINS}"
+                row["n_graphs_rel"] = len(rel)
+            else:
+                row["rho_rel"] = float("nan")
+                row["n_graphs_rel"] = 0
         rows.append(row)
 
     if not rows:
@@ -168,6 +205,22 @@ def build_summary_table(records, n_boot, weight_by_count, out_dir="results"):
             print(f"  WARNING: cells for '{ds}' have differing max populated distance. "
                   "rho is only comparable over an IDENTICAL window -- check max_dist "
                   "was the same for every run before ranking these.")
+    # The window can outrun the data: if the probe ran with a smaller max_dist than the
+    # dataset's rho window expects, absolute rho silently collapses toward zero because
+    # most of its numerator range is simply unpopulated.
+    if "max_d_populated" in df:
+        for ds, sub in df.groupby("dataset"):
+            want = RHO_WINDOW.get(ds, DEFAULT_WINDOW)[1]
+            got = int(sub["max_d_populated"].max())
+            if got < want:
+                print(f"  WARNING: '{ds}' rho window extends to d={want} but curves stop "
+                      f"at d={got}. Absolute rho is computed over a partly empty window "
+                      f"and is not trustworthy -- re-run the probe with "
+                      f"max_dist={want} (src/dataset_meta.py), or use rho_rel.")
+    if "n_graphs_rel" in df and (df["n_graphs_rel"] == 0).all():
+        print("  NOTE: no per-graph diameters recorded, so the relative-distance axis is "
+              "unavailable and rho is within-dataset only. Have run_experiment.py store "
+              "`diameter` alongside each per-graph curve (sensitivity.graph_diameter).")
     return df
 
 
@@ -230,6 +283,9 @@ def criterion_b(df, out_dir="results"):
         return
     if df is None or "rho" not in df or "metric_mean" not in df:
         return
+    # rank on relative rho when present -- it is the cross-dataset-comparable one
+    rho_col = "rho_rel" if ("rho_rel" in df and df["rho_rel"].notna().any()) else "rho"
+    print(f"  criterion (b) ranking on: {rho_col}")
 
     for dataset, sub in df.groupby("dataset"):
         rows, pooled_x, pooled_y = [], [], []
@@ -237,14 +293,14 @@ def criterion_b(df, out_dir="results"):
             {"peptides-func": "ap", "peptides-struct": "mae"}.get(dataset, "macro_f1"), True
         )
         for backbone, cell in sub.groupby("backbone"):
-            cell = cell.dropna(subset=["rho", "metric_mean"])
+            cell = cell.dropna(subset=[rho_col, "metric_mean"])
             if len(cell) < 3:
                 continue
             # flip MAE so "higher is better" holds and the sign of r is interpretable
             y = cell["metric_mean"] if higher_better else -cell["metric_mean"]
-            r, p = spearmanr(cell["rho"], y)
+            r, p = spearmanr(cell[rho_col], y)
             rows.append({"backbone": backbone, "n_pes": len(cell), "spearman_r": r, "p": p})
-            pooled_x += list(cell["rho"])
+            pooled_x += list(cell[rho_col])
             pooled_y += list(y)
         if len(pooled_x) >= 4:
             r, p = spearmanr(pooled_x, pooled_y)

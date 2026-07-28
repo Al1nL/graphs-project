@@ -74,6 +74,20 @@ than by the PE. Rank cells on **ρ**, the long-range mass fraction; it is a rati
 so the gain cancels exactly. Raw curves stay in the appendix. The full argument and the
 amended proposal success criteria are in `docs/analysis-plan.md`.
 
+ρ is reported on two axes, with distinct jobs (`src/dataset_meta.py`):
+
+- **absolute `d`**, per-dataset windows — primary *within* a dataset; the axis
+  over-squashing theory is stated in. `max_dist` is 40 for Peptides (average diameter 57,
+  so the old cap of 20 saw its first third) and 28 for PascalVOC-SP.
+- **relative `d/diam(G)`**, one shared window — primary *across* datasets, and largely
+  immune to the population shift whereby far buckets can only draw from graphs big enough
+  to have them. Needs each graph's diameter in the result JSON.
+
+GRPE's spatial-bias table is a **model** parameter and moves with this: it uses T5-style
+bucketing (exact to d=8, log-spaced to 128, plus a dedicated *unreachable* bucket) rather
+than a hard cap, so measuring out to d=40 does not make GRPE's tail an artefact of the cap.
+Changing it requires re-training the GRPE cells.
+
 ```bash
 python -m pytest tests/                     # or: python tests/test_sensitivity.py
 python scripts/aggregate_results.py         # --d-min/--d-max to test window sensitivity

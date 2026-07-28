@@ -29,18 +29,24 @@ Output: one .pt file per graph (or one sharded .pt per split) containing a dict:
 
 import argparse
 import os
+import sys
 import networkx as nx
 import numpy as np
 import torch
 from torch_geometric.utils import to_networkx, get_laplacian, to_dense_adj
 from torch_geometric.datasets import LRGBDataset
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from dataset_meta import SPD_NUM_BUCKETS, spd_bucket_id  # noqa: E402
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 K_LAP = 16          # number of non-trivial Laplacian eigenvectors kept (LapPE, SignNet-PE input)
 K_RWSE = 20         # number of random-walk steps for RWSE
-SPD_CAP = 20        # shortest-path distances above this are clamped (GRPE bucket cap)
+# GRPE's distance bucketing now lives in src/dataset_meta.py -- it is a MODEL parameter
+# shared by all three adapters, and duplicating it here is what previously let the probe's
+# measurement cap and the model's resolution drift apart. See that module for the scheme.
 
 DATASET_NAME_MAP = {
     "peptides-func": "Peptides-func",
@@ -77,22 +83,40 @@ def compute_rwse(edge_index, num_nodes, k=K_RWSE):
     return torch.tensor(diag, dtype=torch.float32)
 
 
-def compute_spd_and_edge_buckets(edge_index, num_nodes, spd_cap=SPD_CAP):
+def compute_spd_and_edge_buckets(edge_index, num_nodes):
     """All-pairs shortest-path distance + a trivial edge-type bucket id, both needed for
     GRPE-style attention bias (Park et al., 2022). We use unweighted BFS distance; for
     PascalVOC-SP, edge weights exist but GRPE's original formulation buckets by hop count,
-    not by weight, so we follow that convention here for consistency across datasets."""
+    not by weight, so we follow that convention here for consistency across datasets.
+
+    Returns (spd, spd_bucket, edge_type_id):
+      spd         raw hop distance, UNCAPPED, -1 for unreachable
+      spd_bucket  GRPE bias-table index via dataset_meta.spd_bucket_id
+      edge_type_id 0 = no edge, 1 = edge exists
+
+    Two bugs fixed here relative to the previous version, both of which silently corrupted
+    the GRPE arm:
+
+    1. Unreachable pairs were initialised to the cap and BFS ran with `cutoff=cap`, so a
+       pair in a different connected component and a pair at distance >= cap ended up with
+       the SAME value. GRPE then learned one bias meaning "far OR disconnected" -- two
+       different structural relations collapsed into one parameter. They now get distinct
+       buckets.
+
+    2. The cap was applied destructively at cache time, so raising the model's distance
+       resolution required recomputing the entire PE cache rather than editing a config.
+       Raw distances are now stored uncapped and bucketed at model-input time.
+    """
     g = nx.Graph()
     g.add_nodes_from(range(num_nodes))
     g.add_edges_from(edge_index.t().tolist())
-    spd = np.full((num_nodes, num_nodes), spd_cap, dtype=np.int64)
-    for src, lengths in nx.all_pairs_shortest_path_length(g, cutoff=spd_cap):
+    spd = np.full((num_nodes, num_nodes), -1, dtype=np.int64)  # -1 = unreachable
+    for src, lengths in nx.all_pairs_shortest_path_length(g):   # no cutoff: keep the tail
         for dst, d in lengths.items():
             spd[src, dst] = d
-    # edge_type_id: 0 = no edge, 1 = edge exists (extend here if edge attributes carry
-    # multiple categorical types, e.g. bond type in molecular graphs)
+    bucket = np.vectorize(spd_bucket_id, otypes=[np.int64])(spd)
     edge_type_id = (spd == 1).astype(np.int64)
-    return torch.tensor(spd), torch.tensor(edge_type_id)
+    return torch.tensor(spd), torch.tensor(bucket), torch.tensor(edge_type_id)
 
 
 def process_dataset(name, out_dir):
@@ -105,13 +129,14 @@ def process_dataset(name, out_dir):
             n = data.num_nodes
             lap_pe, lap_eigvals = compute_lap_pe(data.edge_index, n)
             rwse = compute_rwse(data.edge_index, n)
-            spd, edge_type_id = compute_spd_and_edge_buckets(data.edge_index, n)
+            spd, spd_bucket, edge_type_id = compute_spd_and_edge_buckets(data.edge_index, n)
             split_records.append({
                 "lap_pe": lap_pe,
                 "lap_eigvals": lap_eigvals,
                 "rwse": rwse,
                 "signnet_in": lap_pe.clone(),  # SignNet encoder consumes raw eigenvectors
-                "spd": spd,
+                "spd": spd,                    # raw hop distance, uncapped, -1 = unreachable
+                "spd_bucket": spd_bucket,      # GRPE bias-table index
                 "edge_type_id": edge_type_id,
             })
             if (i + 1) % 500 == 0:

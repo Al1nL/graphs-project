@@ -49,3 +49,6 @@ optim:
   scheduler: cosine_with_warmup
   num_warmup_epochs: 10
 seed_placeholder: "set via --seed on CLI wrapper, not hardcoded here"
+
+sensitivity:
+  max_dist: 40   # per-dataset; see src/dataset_meta.py

@@ -64,6 +64,7 @@ across graphs by pair count rather than by unweighted graph average -- far pairs
 concentrated in large graphs, so an unweighted average is biased, not merely noisy.
 """
 
+import math
 import warnings
 from collections import defaultdict
 from typing import Callable, Dict, List
@@ -77,6 +78,22 @@ def _build_nx_graph(edge_index, num_nodes) -> nx.Graph:
     g.add_nodes_from(range(num_nodes))
     g.add_edges_from(edge_index.t().tolist())
     return g
+
+
+def graph_diameter(edge_index, num_nodes: int) -> int:
+    """Longest shortest-path in the graph; for disconnected graphs, the largest FINITE one.
+
+    Needed to index curves by relative distance d / diam(G). Cost is O(n * E) (one BFS per
+    node), which is negligible next to the Jacobian probe itself.
+
+    Returns 0 for an edgeless graph.
+    """
+    g = _build_nx_graph(edge_index, num_nodes)
+    best = 0
+    for _, lengths in nx.all_pairs_shortest_path_length(g):
+        if lengths:
+            best = max(best, max(lengths.values()))
+    return best
 
 
 def _distances_from(g: nx.Graph, v: int, num_nodes: int, max_dist: int) -> torch.Tensor:
@@ -216,6 +233,49 @@ def compute_sensitivity_curve(
     }
 
 
+def to_relative_curve(
+    curve: Dict[int, Dict[str, float]],
+    diameter: int,
+    n_bins: int = 10,
+) -> Dict[int, Dict[str, float]]:
+    """Re-index one graph's curve from absolute hop distance d to relative d / diam(G).
+
+    Returns a curve keyed by bin index 1..n_bins, where bin b covers
+    ((b-1)/n_bins, b/n_bins] of the graph's diameter. Values are pair-count-weighted means
+    of the absolute buckets falling in each bin, so the result plugs straight into
+    `long_range_fraction` and `average_curves` unchanged -- both are generic over
+    integer-keyed curves.
+
+    Why this is a POST-HOC transform rather than a probe option: it needs no re-probing,
+    so the axis can be switched at analysis time from stored per-graph curves. That matters
+    because the choice of window is still being tuned, and re-running the probe is
+    expensive.
+
+    Two honest caveats:
+      * Small graphs give coarse granularity -- a diameter-4 graph offers only 4 distinct
+        relative values, so its mass lands in a few bins.
+      * A relative bin mixes different absolute physics (5 hops in a diam-10 graph sits in
+        the same bin as 28 hops in a diam-57 graph). Over-squashing theory is stated in
+        absolute hops, which is why the absolute axis is retained as primary WITHIN a
+        dataset. See src/dataset_meta.py.
+    """
+    if diameter <= 0:
+        return {}
+    if n_bins < 1:
+        raise ValueError(f"n_bins must be >= 1, got {n_bins}")
+    sums, counts = defaultdict(float), defaultdict(int)
+    for d, rec in curve.items():
+        d = int(d)
+        if d < 1:
+            continue
+        # d/diam in (0, 1] -> bin 1..n_bins; d beyond the diameter (possible only for a
+        # disconnected graph measured against its largest finite eccentricity) clamps in.
+        b = min(n_bins, max(1, math.ceil(d / diameter * n_bins)))
+        sums[b] += rec["mean"] * rec["count"]
+        counts[b] += rec["count"]
+    return {b: {"mean": sums[b] / counts[b], "count": counts[b]} for b in sorted(sums)}
+
+
 def average_curves(curves: List[Dict[int, Dict[str, float]]]) -> Dict[int, Dict[str, float]]:
     """Pool s_bar(d) across sampled test graphs, weighted by each bucket's pair count.
 
@@ -227,15 +287,27 @@ def average_curves(curves: List[Dict[int, Dict[str, float]]]) -> Dict[int, Dict[
     NOTE the pooled `count` treats pairs as exchangeable, which they are not (pairs within
     one graph share a model and a topology). Use it for weighting, not for standard
     errors; for uncertainty, compute a per-graph statistic and bootstrap over graphs.
+
+    Also records `n_graphs` per bucket -- the number of graphs contributing any pair at
+    that distance. This is the POPULATION-SHIFT diagnostic: a bucket at d=50 can only
+    contain pairs from graphs whose diameter is at least 50, so as d grows the
+    subpopulation being averaged silently changes. A curve that flattens far out may show
+    genuine long-range flow, or may only show that big graphs are all that is left there.
+    Without this column the two are indistinguishable; with it, the shift is visible.
     """
     sums = defaultdict(float)
     counts = defaultdict(int)
+    graphs = defaultdict(int)
     for c in curves:
         for d, rec in c.items():
             d = int(d)
             sums[d] += rec["mean"] * rec["count"]
             counts[d] += rec["count"]
-    return {d: {"mean": sums[d] / counts[d], "count": counts[d]} for d in sorted(sums)}
+            graphs[d] += 1
+    return {
+        d: {"mean": sums[d] / counts[d], "count": counts[d], "n_graphs": graphs[d]}
+        for d in sorted(sums)
+    }
 
 
 # ---------------------------------------------------------------------------
