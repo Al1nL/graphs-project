@@ -160,10 +160,35 @@ def test_rejects_bad_shapes():
     model_fn = Toy().eval()
     for bad in (0, Q + 1):
         try:
-            compute_sensitivity_curve(model_fn, data, n_shared_feats=bad, max_dist=MAX_D)
-        except ValueError:
+            # num_target_nodes passed explicitly: without it the required-arg check below
+            # fires first and this test would pass for the wrong reason.
+            compute_sensitivity_curve(model_fn, data, n_shared_feats=bad,
+                                      max_dist=MAX_D, num_target_nodes=N)
+        except ValueError as exc:
+            assert "n_shared_feats" in str(exc)
             continue
         raise AssertionError(f"n_shared_feats={bad} should have been rejected")
+
+
+def test_num_target_nodes_is_required():
+    """It has no default on purpose -- it must be calibrated per (backbone, dataset), and
+    a default would reinstate the arbitrary constant scripts/calibrate_target_nodes.py
+    exists to remove."""
+    data, Toy = _fixture()
+    model_fn = Toy().eval()
+    try:
+        compute_sensitivity_curve(model_fn, data, n_shared_feats=Q_SHARED, max_dist=MAX_D)
+    except ValueError as exc:
+        assert "calibrate_target_nodes" in str(exc)
+    else:
+        raise AssertionError("omitting num_target_nodes must raise")
+    for bad in (0, -1):
+        try:
+            compute_sensitivity_curve(model_fn, data, n_shared_feats=Q_SHARED,
+                                      max_dist=MAX_D, num_target_nodes=bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"num_target_nodes={bad} should have been rejected")
 
 
 if __name__ == "__main__":

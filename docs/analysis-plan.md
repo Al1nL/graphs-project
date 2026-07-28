@@ -107,6 +107,60 @@ the pooled row labelled `ALL (pooled)`. Criterion (b) is judged on the pooled re
 
 ---
 
+## Amendment 4 — the target-node budget T is calibrated, not chosen (2026-07-28)
+
+The probe samples `num_target_nodes` (T) target nodes per graph. T was previously a
+hardcoded 32, picked by judgement rather than derived — and since T controls how much of
+each graph's distance profile is observed, and the paper's claims live in the sparse far
+buckets, an unjustified T is a soft spot.
+
+T now has **no default**: `compute_sensitivity_curve` raises if it is not supplied
+(`src/sensitivity.py`). It is calibrated per (backbone, dataset) with
+`scripts/calibrate_target_nodes.py`, which sweeps T over a ladder and selects the smallest
+rung satisfying three criteria against the densest rung as reference:
+
+| | Criterion | Guards against |
+|---|---|---|
+| (i) | ρ within `tol` × the reference CI half-width, for this rung and all larger | subsampling **bias** |
+| (ii) | sparsest distance bucket holds ≥ `min_bucket` pairs | tail buckets never **sampled** |
+| (iii) | this rung's own CI is ≤ (1 + `max_ci_inflation`) × the reference CI | wasted statistical **power** |
+
+Defaults: `tol=0.5`, `min_bucket=5`, `max_ci_inflation=0.15`.
+
+### Why three criteria and not one
+
+Criterion (i) is the obvious one and is close to vacuous on its own. The graph-clustered
+bootstrap interval is dominated by **between-graph** variance, which barely shrinks with T,
+so the acceptance band reflects how heterogeneous the graphs are rather than how precisely
+each was measured. Almost any T clears it — the first calibration run duly recommended
+T=4. That is not a logic error: "subsampling bias is negligible relative to the uncertainty
+we report" is exactly what (i) certifies, and it was true. It is simply not sufficient.
+
+Criterion (iii) is what actually binds. `bootstrap_over_graphs` resamples whole graphs, so
+when T is small each graph's own ρ is noisy, and that measurement noise is not separable
+from genuine between-graph variation — the bootstrap absorbs it into the interval, which
+stays honest but grows. Measured on the calibration run: CI width **3.39e-2 at T=4 against
+2.19e-2 at T=128**, a 55% wider interval bought by sampling 32× less. ρ was unbiased
+throughout; the entire cost was in power.
+
+(iii) also makes the rule self-consistent. Criterion (i) judges each rung against a band
+derived from the *reference's* CI, so without (iii) a rung could be accepted while its own
+interval — the one that would appear in the paper — was far wider than the band it was
+judged against.
+
+### Reporting
+
+`scripts/calibrate_target_nodes.py` writes `calibration_target_nodes_<tag>.{csv,png}` and
+prints the sentence to quote, which names the criterion that actually bound rather than
+implying ρ-stability alone selected T. Run once per (backbone, dataset) — T is a property
+of the probe and the graph regime, not of the PE — before the main grid.
+
+Two guardrails the tool reports rather than silently absorbing: a rung is flagged
+**saturated** when T ≥ n, since it then samples every node and is a different estimator
+rather than denser sampling; and a saturated *reference* rung is flagged as a bad anchor.
+
+---
+
 ## Open decision — the ρ window is provisional
 
 `ρ` is a property of the pair (curve, window), not of the curve alone. It is only

@@ -79,6 +79,23 @@ python -m pytest tests/                     # or: python tests/test_sensitivity.
 python scripts/aggregate_results.py         # --d-min/--d-max to test window sensitivity
 ```
 
+### Calibrate the probe's target-node budget first
+
+`compute_sensitivity_curve`'s `num_target_nodes` (T) has **no default** — it controls how
+much of each graph's distance profile is observed, and the paper's claims live in the
+sparse far buckets, so it is calibrated rather than guessed. Run once per (backbone,
+dataset), then put the reported T in your run config and quote the printed sentence:
+
+```bash
+python scripts/calibrate_target_nodes.py --demo      # exercises the pipeline, no model needed
+python scripts/calibrate_target_nodes.py --backbone gps --pe rwse --dataset peptides-func
+```
+
+It sweeps T and picks the smallest rung that is unbiased in ρ, dense enough in the tail,
+and no wider in its bootstrap CI than the densest rung. See `docs/analysis-plan.md`
+(Amendment 4) for why all three criteria are needed — ρ-stability alone accepts almost any
+T, because the CI is dominated by between-graph variance that does not shrink with T.
+
 ## The 5 PE variants (unchanged from proposal, now computed once and shared)
 
 | PE | Level | Native fit | Adaptation needed |

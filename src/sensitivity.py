@@ -135,7 +135,7 @@ def compute_sensitivity_curve(
     data,
     n_shared_feats: int,
     max_dist: int = 20,
-    num_target_nodes: int = 32,
+    num_target_nodes: int = None,
     chunk_size: int = 16,
     seed: int = 0,
     _batched_ok: bool = True,
@@ -152,10 +152,27 @@ def compute_sensitivity_curve(
                   the top of this module.
         max_dist: hop-distance cutoff for bucketing.
         num_target_nodes: target nodes v sampled per graph (all of them if n is smaller).
+                  REQUIRED, deliberately with no default: this controls how much of each
+                  graph's distance profile is observed, and the paper's claims live in the
+                  sparse far buckets. Calibrate it per (backbone, dataset) with
+                  `scripts/calibrate_target_nodes.py`, which sweeps it and reports the
+                  smallest value at which rho is stable AND the tail buckets are populated.
+                  A default here would just be an arbitrary constant wearing a plausible
+                  number, which is what that script exists to eliminate.
         chunk_size: output basis vectors per batched backward pass; lower to cut memory.
     Returns:
         {hop distance d: {"mean": mean ||d h_v / d x_u||_F, "count": pairs in the bucket}}
     """
+    if num_target_nodes is None:
+        raise ValueError(
+            "num_target_nodes is required and has no default. Calibrate it for this "
+            "(backbone, dataset) with `python scripts/calibrate_target_nodes.py "
+            "--backbone ... --pe ... --dataset ...` and pass the value it reports; see "
+            "docs/analysis-plan.md for why it is not allowed to be an arbitrary constant."
+        )
+    if num_target_nodes < 1:
+        raise ValueError(f"num_target_nodes must be >= 1, got {num_target_nodes}")
+
     x = data.x.clone().detach().requires_grad_(True)
     if x.dim() != 2:
         raise ValueError(f"expected data.x of shape [n, q], got {tuple(x.shape)}")
