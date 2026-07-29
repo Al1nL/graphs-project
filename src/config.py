@@ -61,9 +61,31 @@ PE_CACHE_VERSION = 2   # v2: uint8 spd with 255=unreachable, per-graph files, de
 # once, from `git -C ../GraphGPS rev-parse HEAD`, and never run a grid with any of them
 # None for a backbone you are actually using.
 PINNED_COMMITS = {
-    "gps": None,          # rampasek/GraphGPS
-    "san": None,          # DevinKreuzer/SAN
-    "graphormer": None,   # microsoft/Graphormer
+    # pinned 2026-07-29, level with rampasek/GraphGPS main at the time of forking
+    "gps": "28015707cbab7f8ad72bed0ee872d068ea59c94b",
+    "san": None,          # DevinKreuzer/SAN -- not forked yet
+    "graphormer": None,   # microsoft/Graphormer -- not forked yet
+}
+
+# We clone OUR FORKS, not upstream directly. A commit SHA is only a reference: it assumes
+# the object still exists on someone else's server, so a pin alone does not survive a
+# force-push, a rename, or a deletion. The fork preserves the objects; the pin identifies
+# which one. They are complementary, not alternatives.
+#
+# The forks are also where our architectural adaptations have to live -- SAN+GRPE and
+# GraphGPS's GRPE attention-bias hook are genuine additions to the published models (see
+# README), and uncommitted edits in an unversioned clone is the most fragile place they
+# could possibly sit.
+FORK_URLS = {
+    "gps": "https://github.com/pazflashner/GraphGPS.git",
+    "san": None,
+    "graphormer": None,
+}
+
+UPSTREAM_URLS = {   # the `upstream` remote inside each fork, for syncing
+    "gps": "https://github.com/rampasek/GraphGPS.git",
+    "san": "https://github.com/DevinKreuzer/SAN.git",
+    "graphormer": "https://github.com/microsoft/Graphormer.git",
 }
 
 UPSTREAM_PATHS = {
@@ -86,6 +108,34 @@ def repo_sha() -> Optional[str]:
     return _git_sha(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
+def _git_origin(path: str) -> Optional[str]:
+    try:
+        out = subprocess.run(["git", "-C", path, "remote", "get-url", "origin"],
+                             capture_output=True, text=True, timeout=10)
+        return out.stdout.strip() or None if out.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _same_repo(a: str, b: str) -> bool:
+    """Compare remote URLs ignoring the noise that distinguishes equivalent forms.
+
+    The same repository is written several ways and none of them may read as a different
+    repo, or pre-flight would reject a perfectly good clone:
+
+        https://github.com/x/Y.git    https://github.com/x/Y/    (suffix, trailing slash)
+        git@github.com:x/Y.git                                   (SSH -- host:path, not
+                                                                  host/path, which is why
+                                                                  the colon is rewritten)
+    """
+    def norm(u):
+        u = u.strip().rstrip("/")
+        u = u[:-4] if u.endswith(".git") else u
+        u = u.split("://")[-1].split("@")[-1]
+        return u.replace(":", "/", 1).lower()   # SSH `host:path` -> `host/path`
+    return norm(a) == norm(b)
+
+
 def check_pinned(backbone: str, strict: bool = True) -> dict:
     """Compare the checked-out upstream commit against the pin. Returns a report dict.
 
@@ -93,9 +143,27 @@ def check_pinned(backbone: str, strict: bool = True) -> dict:
     whose numbers will not appear anywhere.
     """
     pinned = PINNED_COMMITS.get(backbone)
-    actual = _git_sha(UPSTREAM_PATHS.get(backbone, ""))
+    path = UPSTREAM_PATHS.get(backbone, "")
+    actual = _git_sha(path)
+    origin = _git_origin(path)
+    fork = FORK_URLS.get(backbone)
     report = {"backbone": backbone, "pinned": pinned, "actual": actual,
+              "origin": origin, "expected_origin": fork,
               "status": "ok" if (pinned and actual == pinned) else None}
+
+    # A clone pointed at upstream rather than our fork carries the same SHA today and
+    # loses it the moment upstream force-pushes -- and it has nowhere to hold our GRPE
+    # adaptations. Same object, wrong provenance.
+    if fork and origin and not _same_repo(origin, fork):
+        report["status"] = "wrong_origin"
+        msg = (f"{backbone} at {path} has origin {origin}, expected the fork {fork}. "
+               "Clone the fork: a pin into someone else's repo does not survive a "
+               "force-push or a deletion, and local patches have nowhere to live.")
+        if strict:
+            raise RuntimeError(msg)
+        report["warning"] = msg
+        return report
+
     if pinned is None:
         report["status"] = "unpinned"
         msg = (f"{backbone} has no pinned commit in config.PINNED_COMMITS. Record "

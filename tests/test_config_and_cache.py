@@ -26,6 +26,7 @@ from cache import (  # noqa: E402
     encode_spd,
     estimate_cache_bytes,
 )
+import config  # noqa: E402
 from config import (  # noqa: E402
     BACKBONES,
     DATASETS,
@@ -88,18 +89,102 @@ def test_run_config_derives_paths_and_per_dataset_max_dist():
     assert RunConfig("gps", "none", "peptides-func", 0).resolved_max_dist() == 40
 
 
+class _FakeRepo:
+    """Pin config.check_pinned's view of the world so the test does not depend on which
+    repos happen to be cloned on this machine.
+
+    The previous version of this test read the real git state and asserted only inside an
+    `if status != "ok"` branch. The moment `gps` was actually pinned, that branch stopped
+    running and the test passed while checking nothing. Retargeting it at an
+    as-yet-unpinned backbone would just relocate the same time bomb, so the fix is to make
+    the test independent of ambient state entirely.
+    """
+
+    def __init__(self, sha=None, origin=None, pinned=None, fork=None):
+        self.sha, self.origin, self.pinned, self.fork = sha, origin, pinned, fork
+
+    def __enter__(self):
+        self._saved = (config._git_sha, config._git_origin,
+                       dict(config.PINNED_COMMITS), dict(config.FORK_URLS))
+        config._git_sha = lambda _p: self.sha
+        config._git_origin = lambda _p: self.origin
+        config.PINNED_COMMITS["gps"] = self.pinned
+        config.FORK_URLS["gps"] = self.fork
+        return self
+
+    def __exit__(self, *exc):
+        config._git_sha, config._git_origin = self._saved[0], self._saved[1]
+        config.PINNED_COMMITS.clear(); config.PINNED_COMMITS.update(self._saved[2])
+        config.FORK_URLS.clear(); config.FORK_URLS.update(self._saved[3])
+
+
+FORK = "https://github.com/pazflashner/GraphGPS.git"
+UPSTREAM = "https://github.com/rampasek/GraphGPS.git"
+SHA = "a" * 40
+
+
+def _status(**kw):
+    with _FakeRepo(**kw):
+        return check_pinned("gps", strict=False)["status"]
+
+
+def test_check_pinned_covers_every_status():
+    assert _status(sha=SHA, origin=FORK, pinned=SHA, fork=FORK) == "ok"
+    assert _status(sha=SHA, origin=FORK, pinned=None, fork=FORK) == "unpinned"
+    assert _status(sha="b" * 40, origin=FORK, pinned=SHA, fork=FORK) == "mismatch"
+    assert _status(sha=None, origin=None, pinned=SHA, fork=None) == "missing"
+
+
 def test_unpinned_upstream_is_loud_not_silent():
     """PINNED_COMMITS holds None, not 'main'. A None is a checkable 'nobody pinned this';
-    a 'main' is a lie that looks like a pin."""
-    rep = check_pinned("gps", strict=False)
-    assert rep["status"] in ("unpinned", "missing", "mismatch", "ok")
-    if rep["status"] != "ok":
-        assert "warning" in rep
+    a 'main' is a lie that looks like a pin. Strict mode must refuse to proceed."""
+    for kw in ({"sha": SHA, "origin": FORK, "pinned": None, "fork": FORK},      # unpinned
+               {"sha": "b" * 40, "origin": FORK, "pinned": SHA, "fork": FORK},  # mismatch
+               {"sha": None, "origin": None, "pinned": SHA, "fork": None}):     # missing
+        with _FakeRepo(**kw):
+            assert "warning" in check_pinned("gps", strict=False)
+            try:
+                check_pinned("gps", strict=True)
+            except RuntimeError:
+                continue
+            raise AssertionError(f"strict mode must raise for {kw}")
+
+
+def test_clone_pointed_at_upstream_instead_of_the_fork_is_rejected():
+    """The subtle one: origin=upstream carries the SAME sha today, so it looks correct --
+    and loses it the moment upstream force-pushes, with nowhere for our GRPE adaptations
+    to live. It must fail loudly rather than pass."""
+    with _FakeRepo(sha=SHA, origin=UPSTREAM, pinned=SHA, fork=FORK):
+        rep = check_pinned("gps", strict=False)
+        assert rep["status"] == "wrong_origin"
+        assert rep["origin"] == UPSTREAM and rep["expected_origin"] == FORK
+        assert "force-push" in rep["warning"]
         try:
             check_pinned("gps", strict=True)
         except RuntimeError:
             return
-        raise AssertionError("strict mode must raise on an unpinned upstream")
+        raise AssertionError("a clone of upstream rather than the fork must be rejected")
+
+
+def test_same_repo_normalisation():
+    """Remote URLs for one repo differ in ways that must not read as different repos."""
+    same = [
+        ("https://github.com/x/Y.git", "https://github.com/x/Y"),
+        ("https://github.com/x/Y/", "https://github.com/x/Y"),
+        ("git@github.com:x/Y.git", "https://github.com/x/Y"),
+        ("https://GitHub.com/X/y", "https://github.com/x/Y"),
+    ]
+    for a, b in same:
+        assert config._same_repo(a, b), (a, b)
+    assert not config._same_repo("https://github.com/x/Y", "https://github.com/z/Y")
+    assert not config._same_repo("https://github.com/x/Y", "https://github.com/x/Z")
+
+
+def test_no_fork_url_recorded_skips_the_origin_check():
+    """san/graphormer have no fork yet; absence of a fork URL must not be a hard failure
+    on its own -- the unpinned check is what catches them."""
+    with _FakeRepo(sha=SHA, origin=UPSTREAM, pinned=SHA, fork=None):
+        assert check_pinned("gps", strict=False)["status"] == "ok"
 
 
 # --------------------------------------------------------------------------- cache

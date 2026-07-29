@@ -134,10 +134,11 @@ it's a source of confound we can't fully remove, only document.
 ## Environment setup (on your own GPU machine)
 
 ```bash
-# 1. Clone the three official backbones as siblings of this repo
-git clone https://github.com/rampasek/GraphGPS.git
-git clone https://github.com/DevinKreuzer/SAN.git
-git clone https://github.com/microsoft/Graphormer.git
+# 1. FORK each backbone on GitHub, add the fork URL to src/config.py FORK_URLS, then:
+bash scripts/setup_upstream.sh          # clones your forks as siblings, adds an
+                                        # `upstream` remote, checks out the pinned commit
+# Do NOT `git clone` upstream directly -- pre-flight rejects it (see "Version locking").
+# Status today: gps forked and pinned; san and graphormer still need forking.
 
 # 2. Create one env per backbone (their pinned dependency sets conflict with each other -
 #    GraphGPS wants PyG>=2.0 + torch 1.9-2.x, SAN pins an older PyG/DGL combo, Graphormer
@@ -146,8 +147,8 @@ conda env create -f envs/graphgps_env.yml
 conda env create -f envs/san_env.yml
 conda env create -f envs/graphormer_env.yml
 
-# 3. Pin the upstream commits in src/config.py PINNED_COMMITS (see "Version locking")
-git -C ../GraphGPS rev-parse HEAD    # paste into config.PINNED_COMMITS["gps"], etc.
+# 3. Pin the commit. setup_upstream.sh prints the exact line to paste into
+#    config.PINNED_COMMITS for any backbone that is cloned but not yet pinned.
 
 # 4. Precompute the shared PEs once per dataset (cached to disk, reused by all backbones)
 python src/pe/compute_pe.py --dataset peptides-func   --out cache/peptides-func/
@@ -177,6 +178,30 @@ rather than break loudly:
 this yet", whereas `"main"` is a lie that looks like a pin. A grid run half before and half
 after an upstream change is not a controlled comparison, so `launch.py` refuses to start
 until the pins are filled (override with `--no-strict-pins` for throwaway runs only).
+
+### Why forks, given we already pin commits
+
+A SHA is a *reference*: it assumes the object still exists on someone else's server. Pinning
+survives ordinary upstream drift, but **not** a force-push, a rename, or a deletion — in all
+three the pin dangles and there is no way back to the pinned state. The fork preserves the
+objects; the pin identifies which one. They are complementary, not alternatives.
+
+The fork is also the only sane home for our architectural adaptations: SAN+GRPE and
+GraphGPS's GRPE attention-bias hook are genuine additions to the published models, and
+uncommitted edits inside an unversioned clone is the most fragile place they could sit.
+
+`check_pinned` therefore verifies that each clone's `origin` is *your fork*, not upstream —
+a clone of upstream carries the same SHA today and loses it the moment upstream rewrites
+history. HTTPS and SSH remote forms are treated as equivalent.
+
+| backbone | forked | pinned |
+|---|---|---|
+| GraphGPS | `pazflashner/GraphGPS` | `28015707` |
+| SAN | not yet | — |
+| Graphormer | not yet | — |
+
+**All teammates must pin the same forks.** If two people pin different ones, their results
+are not comparable and the grid silently stops being a controlled experiment.
 
 ## PE cache format
 
