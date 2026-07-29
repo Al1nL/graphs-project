@@ -88,6 +88,33 @@ Relatedly, curves are pooled across graphs **weighted by each bucket's pair coun
 number of far pairs a graph contributes scales with its size, and sensitivity itself
 correlates with graph size, so an unweighted mean over graphs is biased, not merely noisy.
 
+### Amended 2026-07-29 — the cluster is the graph *identity*, not the measurement
+
+There are two levels of dependence, and the paragraph above only addressed the inner one.
+The same test graphs are probed under **every training seed**, so graph 17 at seeds 0/1/2
+is one molecule measured three times — its topology, diameter and distance profile are
+identical across all three, and topology is what drives the distance profile. Treating
+those as three independent observations understates the standard error by up to
+`sqrt(n_seeds)`.
+
+The bootstrap therefore clusters on a stable `graph_id` (the test-split index): resample
+graph identities with replacement, and carry **all** of a drawn identity's seeds along.
+`n` is the number of distinct molecules, not the number of (graph, seed) measurements —
+40 rather than 120 in a 3-seed run. The summary table reports both, as `n_graphs` and
+`n_measurements`, plus `clustered_by`.
+
+**No seed-level variance component is estimated.** A nested resample of seeds was
+considered and rejected: with 3 seeds only 10 distinct resamples exist and ~11% of them
+would draw a single seed three times, so it would be noise dressed as inference. Seed
+variation is instead absorbed as within-cluster noise (conservative and correct), and seed
+spread is reported separately as `rho_seed_mean ± rho_seed_std`, per ML convention.
+
+`graph_id` **cannot be added after the fact** — without it, recovering the clustering
+requires re-training. It is required in the result schema from the first run.
+
+Degrades cleanly: under the README's `reduced` grid, SAN and Graphormer run one seed, where
+every identity is unique and clustering is a no-op.
+
 ---
 
 ## Amendment 3 — criterion (b) is underpowered as written

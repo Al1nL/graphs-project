@@ -124,6 +124,71 @@ def test_bootstrap_brackets_point_estimate_and_narrows_with_agreement():
     assert (hi1 - lo1) < (hi2 - lo2)      # gain-only spread carries no rho uncertainty
 
 
+def test_clustering_by_graph_identity_does_not_let_seeds_fake_precision():
+    """THE test for clustering. Probing the same graphs under 3 seeds must not shrink the
+    interval as if it were 3x the data.
+
+    The same test graphs are probed under every training run, so graph 17 at seeds 0/1/2
+    is one molecule measured three times -- its topology, diameter and distance profile are
+    identical across all three, and topology is what drives the distance profile. Treating
+    those as independent understates the standard error by up to sqrt(n_seeds).
+    """
+    stat = lambda c: long_range_fraction(c, D_MIN, D_MAX)  # noqa: E731
+    graphs = [_curve(_slow if i % 3 else _fast, gain=1.0 + 0.05 * i) for i in range(30)]
+
+    # what one seed alone would give
+    _, lo1, hi1 = bootstrap_over_graphs(graphs, stat, n_boot=400, seed=0)
+
+    # three seeds over the SAME graphs; ids repeat, gains differ slightly per seed
+    tripled, ids = [], []
+    for seed in range(3):
+        for i, g in enumerate(graphs):
+            tripled.append({d: {"mean": b["mean"] * (1 + 0.01 * seed), "count": b["count"]}
+                            for d, b in g.items()})
+            ids.append(i)                      # graph identity, stable across seeds
+
+    _, lo_flat, hi_flat = bootstrap_over_graphs(tripled, stat, n_boot=400, seed=0)
+    _, lo_cl, hi_cl = bootstrap_over_graphs(tripled, stat, groups=ids, n_boot=400, seed=0)
+
+    w1, w_flat, w_cl = hi1 - lo1, hi_flat - lo_flat, hi_cl - lo_cl
+    assert w_flat < w1 * 0.75, (w_flat, w1)    # flattening fakes ~sqrt(3) more precision
+    assert w_cl > w_flat * 1.3, (w_cl, w_flat)  # clustering refuses to
+    assert abs(w_cl - w1) / w1 < 0.35, (w_cl, w1)  # and lands near the one-seed width
+
+
+def test_clustering_is_a_noop_for_single_seed_runs():
+    """Under the reduced grid SAN and Graphormer run 1 seed, where every id is unique."""
+    stat = lambda c: long_range_fraction(c, D_MIN, D_MAX)  # noqa: E731
+    graphs = [_curve(_slow, gain=1.0 + 0.1 * i) for i in range(20)]
+    a = bootstrap_over_graphs(graphs, stat, n_boot=200, seed=3)
+    b = bootstrap_over_graphs(graphs, stat, groups=list(range(20)), n_boot=200, seed=3)
+    assert a == b
+
+
+def test_clustering_carries_all_members_of_a_drawn_cluster():
+    """A cluster drawn twice must contribute all its members twice, so a group of
+    identical curves behaves like a single heavier observation."""
+    stat = lambda c: long_range_fraction(c, D_MIN, D_MAX)  # noqa: E731
+    a = _curve(_slow)
+    b = _curve(_fast)
+    # two identities, three copies each -> only 2 clusters, so no usable interval
+    point, lo, hi = bootstrap_over_graphs(
+        [a, a, a, b, b, b], stat, groups=["g0"] * 3 + ["g1"] * 3, n_boot=100
+    )
+    assert not math.isnan(point)
+    assert point == long_range_fraction(average_curves([a, a, a, b, b, b]), D_MIN, D_MAX)
+
+
+def test_bootstrap_rejects_misaligned_groups():
+    stat = lambda c: long_range_fraction(c, D_MIN, D_MAX)  # noqa: E731
+    try:
+        bootstrap_over_graphs([_curve(_slow)] * 3, stat, groups=[1, 2])
+    except ValueError as exc:
+        assert "parallel" in str(exc)
+        return
+    raise AssertionError("misaligned groups must be rejected")
+
+
 def test_bootstrap_degenerate_inputs():
     stat = lambda c: long_range_fraction(c, D_MIN, D_MAX)  # noqa: E731
     p, lo, hi = bootstrap_over_graphs([], stat)

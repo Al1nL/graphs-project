@@ -399,35 +399,73 @@ def long_range_fraction(
 def bootstrap_over_graphs(
     per_graph_curves: List[Dict[int, Dict[str, float]]],
     stat_fn: Callable[[Dict[int, Dict[str, float]]], float],
+    groups: List = None,
     n_boot: int = 1000,
     ci: float = 0.95,
     seed: int = 0,
 ):
-    """Point estimate and confidence interval for a curve statistic, CLUSTERED BY GRAPH.
+    """Point estimate and confidence interval for a curve statistic, CLUSTERED.
 
-    Resamples whole graphs with replacement, re-pools, and recomputes the statistic.
+    Resamples whole clusters with replacement, re-pools, and recomputes the statistic.
 
-    This is the part that survives review. Node pairs within one graph are NOT
-    independent -- they share a model and a topology, and their paths overlap -- so
-    treating ~50,000 sampled pairs as 50,000 independent observations understates the
-    standard error badly. Resampling at the level of the independent unit (the graph)
-    gives n = number of sampled graphs, which is smaller, honest, and immune to the
-    "your error bars assume independence you don't have" objection.
+    Node pairs within one graph are NOT independent -- they share a model and a topology,
+    and their paths overlap -- so treating ~50,000 sampled pairs as 50,000 independent
+    observations understates the standard error badly. Resampling at the level of the
+    independent unit gives an honest n, and is immune to the "your error bars assume
+    independence you don't have" objection.
 
-    Returns (point, lo, hi); lo/hi are NaN if fewer than 2 graphs are supplied.
+    `groups` names the independent unit, and there are two levels to get right:
+
+      groups=None   each curve is its own cluster. Correct when every curve comes from a
+                    distinct graph -- e.g. a single-seed run.
+
+      groups=[...]  a key per curve, parallel to `per_graph_curves`. Curves sharing a key
+                    are resampled TOGETHER, as one unit.
+
+    The second form exists because the same test graphs are probed under every training
+    seed. Graph 17 at seed 0, seed 1 and seed 2 is ONE molecule measured three times, not
+    three independent observations: its topology, diameter and distance profile are
+    identical across all three, and topology is what drives the distance profile. Passing
+    the graph identity as the key keeps those three together, so n is the number of
+    distinct graphs rather than the number of (graph, seed) measurements. Flattening them
+    would understate the standard error by up to sqrt(n_seeds).
+
+    Seed variation is then absorbed as WITHIN-cluster noise, which is conservative and
+    correct. Deliberately, no attempt is made to estimate a seed-level variance component:
+    with 3 seeds there are only 10 distinct resamples and ~11% of them would draw a single
+    seed three times, so a nested resample of seeds would be noise dressed as inference.
+    Report seed spread separately as mean +/- std instead.
+
+    Returns (point, lo, hi); lo/hi are NaN if fewer than 2 clusters are supplied.
     """
     if not per_graph_curves:
         return float("nan"), float("nan"), float("nan")
     point = stat_fn(average_curves(per_graph_curves))
-    n_graphs = len(per_graph_curves)
-    if n_graphs < 2:
+
+    if groups is None:
+        members = [[i] for i in range(len(per_graph_curves))]
+    else:
+        if len(groups) != len(per_graph_curves):
+            raise ValueError(
+                f"groups has {len(groups)} entries but there are "
+                f"{len(per_graph_curves)} curves; they must be parallel"
+            )
+        by_key = defaultdict(list)
+        for i, key in enumerate(groups):
+            by_key[key].append(i)
+        members = list(by_key.values())
+
+    n_clusters = len(members)
+    if n_clusters < 2:
         return point, float("nan"), float("nan")
 
     rng = torch.Generator().manual_seed(seed)
     vals = []
     for _ in range(n_boot):
-        idx = torch.randint(n_graphs, (n_graphs,), generator=rng).tolist()
-        v = stat_fn(average_curves([per_graph_curves[i] for i in idx]))
+        drawn = torch.randint(n_clusters, (n_clusters,), generator=rng).tolist()
+        # a cluster drawn twice contributes all of its members twice -- that is the point
+        sample = [per_graph_curves[j] for c in drawn for j in members[c]]
+        v = stat_fn(average_curves(sample))
         if v == v:  # drop NaN
             vals.append(v)
     if len(vals) < 2:

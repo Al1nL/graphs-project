@@ -150,7 +150,14 @@ def main():
                                         #     pooled over sampled graphs via average_curves
         "sensitivity_curves_per_graph": [],
         # ^ FILL AFTER RUN: one entry per sampled test graph, shaped
-        #     {"curve": {d: {"mean":, "count":}}, "diameter": int, "num_nodes": int}
+        #     {"curve": {d: {"mean":, "count":}}, "diameter": int, "num_nodes": int,
+        #      "graph_id": int}
+        #   `graph_id` is the TEST-SPLIT INDEX and must be stable across seeds: the same
+        #   graphs are probed under every training run, so graph 17 at seeds 0/1/2 is ONE
+        #   molecule measured three times, not three independent observations. The
+        #   bootstrap clusters on it; without it the standard error is understated by up
+        #   to sqrt(n_seeds). It CANNOT be added after the fact -- record it from the
+        #   first run or re-train to recover it.
         #   `diameter` (sensitivity.graph_diameter) is REQUIRED for the relative-distance
         #   axis: it rebins each graph onto d/diam(G) so rho is comparable ACROSS datasets
         #   whose diameters differ ~2x, and so far buckets are not dominated by whichever

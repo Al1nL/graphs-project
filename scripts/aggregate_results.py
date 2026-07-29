@@ -96,20 +96,37 @@ def _as_curve(raw):
 
 
 def _per_graph_curves(record):
-    """Per-graph curves as (curve, diameter) pairs.
+    """Per-graph entries as dicts: {curve, diameter, graph_id, seed}.
 
-    Accepts both the current schema -- {"curve": {...}, "diameter": int} -- and a bare
-    curve dict from before diameters were recorded. Without a diameter a graph cannot be
-    rebinned onto the relative axis, so it contributes to absolute rho only; `diameter`
-    is None in that case rather than guessed.
+    Accepts the current schema -- {"curve": {...}, "diameter": int, "graph_id": int} --
+    and a bare curve dict from before those fields existed. Missing values are None rather
+    than guessed: without `diameter` a graph cannot be rebinned onto the relative axis, and
+    without `graph_id` its seed-copies cannot be recognised as the same molecule.
     """
     out = []
-    for entry in record.get("sensitivity_curves_per_graph") or []:
+    seed = record.get("seed")
+    for i, entry in enumerate(record.get("sensitivity_curves_per_graph") or []):
         if isinstance(entry, dict) and "curve" in entry:
-            out.append((_as_curve(entry["curve"]), entry.get("diameter")))
+            out.append({"curve": _as_curve(entry["curve"]),
+                        "diameter": entry.get("diameter"),
+                        "graph_id": entry.get("graph_id"),
+                        "seed": seed})
         else:
-            out.append((_as_curve(entry), None))
+            out.append({"curve": _as_curve(entry), "diameter": None,
+                        "graph_id": None, "seed": seed})
     return out
+
+
+def _cluster_keys(entries):
+    """Group key per entry: the graph identity, so a molecule's seed-copies stay together.
+
+    Returns None if any entry lacks a graph_id, which makes clustering impossible -- the
+    caller then falls back to treating each (graph, seed) measurement as its own cluster
+    and warns, rather than silently inventing identities.
+    """
+    if any(e["graph_id"] is None for e in entries):
+        return None
+    return [e["graph_id"] for e in entries]
 
 
 def build_summary_table(records, n_boot, weight_by_count, out_dir="results"):
@@ -156,28 +173,59 @@ def build_summary_table(records, n_boot, weight_by_count, out_dir="results"):
             row["min_graphs_in_tail_bucket"] = min(tail_graphs) if tail_graphs else 0
             row["graphs_at_d1"] = pooled.get(1, {}).get("n_graphs", 0)
 
-            abs_curves = [c for c, _ in cell["per_graph"]]
-            if abs_curves:
-                _, lo, hi = bootstrap_over_graphs(abs_curves, stat, n_boot=n_boot)
+            entries = cell["per_graph"]
+            keys = _cluster_keys(entries)
+            row["clustered_by"] = "graph_id" if keys else "measurement"
+            row["n_measurements"] = len(entries)
+            # n_graphs is the number of INDEPENDENT units, i.e. distinct molecules -- not
+            # the number of (graph, seed) measurements. The same test graphs are probed
+            # under every seed, so those copies are one unit, not n_seeds units.
+            row["n_graphs"] = len(set(keys)) if keys else len(entries)
+
+            if entries:
+                _, lo, hi = bootstrap_over_graphs(
+                    [e["curve"] for e in entries], stat, groups=keys, n_boot=n_boot
+                )
                 row["rho_ci_lo"], row["rho_ci_hi"] = lo, hi
-                row["n_graphs"] = len(abs_curves)
             else:
                 row["rho_ci_lo"] = row["rho_ci_hi"] = float("nan")
-                row["n_graphs"] = 0
+
+            # Seed spread, reported SEPARATELY rather than folded into the interval: with
+            # 3 seeds there is no usable seed-level variance component to estimate, so the
+            # bootstrap absorbs seed variation as within-cluster noise and this column
+            # carries it explicitly, as mean +/- std over per-seed rho.
+            by_seed = defaultdict(list)
+            for e in entries:
+                by_seed[e["seed"]].append(e["curve"])
+            seed_rhos = [stat(average_curves(cs)) for cs in by_seed.values()]
+            seed_rhos = [v for v in seed_rhos if v == v]
+            if seed_rhos:
+                s = pd.Series(seed_rhos)
+                row["rho_seed_mean"] = s.mean()
+                row["rho_seed_std"] = s.std() if len(seed_rhos) > 1 else float("nan")
+                row["n_seeds_with_curves"] = len(seed_rhos)
 
             # RELATIVE-axis rho: rebin each graph onto d/diam(G) deciles, then pool. This
             # is the cross-dataset-comparable number; absolute rho is not, because the
             # absolute windows differ per dataset by design.
-            rel = [to_relative_curve(c, dia, REL_BINS)
-                   for c, dia in cell["per_graph"] if dia]
-            rel = [c for c in rel if c]
+            rel, rel_keys = [], []
+            for e in entries:
+                if not e["diameter"]:
+                    continue
+                c = to_relative_curve(e["curve"], e["diameter"], REL_BINS)
+                if c:
+                    rel.append(c)
+                    rel_keys.append(e["graph_id"])
             if rel:
                 b_lo, b_hi = REL_RHO_WINDOW
                 rstat = lambda c: long_range_fraction(c, b_lo, b_hi, weight_by_count)  # noqa: E731
-                r_rho, r_lo, r_hi = bootstrap_over_graphs(rel, rstat, n_boot=n_boot)
+                rk = None if any(k is None for k in rel_keys) else rel_keys
+                r_rho, r_lo, r_hi = bootstrap_over_graphs(
+                    rel, rstat, groups=rk, n_boot=n_boot
+                )
                 row["rho_rel"], row["rho_rel_ci_lo"], row["rho_rel_ci_hi"] = r_rho, r_lo, r_hi
                 row["rho_rel_window"] = f"bins {b_lo}-{b_hi} of {REL_BINS}"
-                row["n_graphs_rel"] = len(rel)
+                row["n_graphs_rel"] = len(set(rk)) if rk else len(rel)
             else:
                 row["rho_rel"] = float("nan")
                 row["n_graphs_rel"] = 0
@@ -217,6 +265,16 @@ def build_summary_table(records, n_boot, weight_by_count, out_dir="results"):
                       f"at d={got}. Absolute rho is computed over a partly empty window "
                       f"and is not trustworthy -- re-run the probe with "
                       f"max_dist={want} (src/dataset_meta.py), or use rho_rel.")
+    if "clustered_by" in df:
+        unclustered = df[df["clustered_by"] == "measurement"]
+        multiseed = unclustered[unclustered.get("n_seeds", 0) > 1]
+        if len(multiseed):
+            print(f"  WARNING: {len(multiseed)} multi-seed cell(s) have no `graph_id` in "
+                  "their per-graph curves, so each (graph, seed) measurement was treated "
+                  "as an independent cluster. The same test graphs are probed under every "
+                  "seed, so this UNDERSTATES the standard error by up to sqrt(n_seeds). "
+                  "Have run_experiment.py record graph_id -- it cannot be recovered after "
+                  "the fact without re-running.")
     if "n_graphs_rel" in df and (df["n_graphs_rel"] == 0).all():
         print("  NOTE: no per-graph diameters recorded, so the relative-distance axis is "
               "unavailable and rho is within-dataset only. Have run_experiment.py store "
