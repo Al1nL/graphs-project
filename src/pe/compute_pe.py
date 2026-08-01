@@ -37,7 +37,8 @@ from torch_geometric.utils import to_networkx, get_laplacian, to_dense_adj
 from torch_geometric.datasets import LRGBDataset
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from dataset_meta import SPD_NUM_BUCKETS, spd_bucket_id  # noqa: E402
+from dataset_meta import DATASETS  # noqa: E402
+from cache import PECacheWriter, SPLITS, estimate_cache_bytes  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Config
@@ -47,6 +48,11 @@ K_RWSE = 20         # number of random-walk steps for RWSE
 # GRPE's distance bucketing now lives in src/dataset_meta.py -- it is a MODEL parameter
 # shared by all three adapters, and duplicating it here is what previously let the probe's
 # measurement cap and the model's resolution drift apart. See that module for the scheme.
+
+# Approximate split-total graph counts, used only for the pre-flight size estimate.
+_APPROX_GRAPH_COUNT = {
+    "peptides-func": 15535, "peptides-struct": 15535, "pascalvoc-sp": 11355,
+}
 
 DATASET_NAME_MAP = {
     "peptides-func": "Peptides-func",
@@ -83,18 +89,20 @@ def compute_rwse(edge_index, num_nodes, k=K_RWSE):
     return torch.tensor(diag, dtype=torch.float32)
 
 
-def compute_spd_and_edge_buckets(edge_index, num_nodes):
+def compute_spd(edge_index, num_nodes):
     """All-pairs shortest-path distance + a trivial edge-type bucket id, both needed for
     GRPE-style attention bias (Park et al., 2022). We use unweighted BFS distance; for
     PascalVOC-SP, edge weights exist but GRPE's original formulation buckets by hop count,
     not by weight, so we follow that convention here for consistency across datasets.
 
-    Returns (spd, spd_bucket, edge_type_id):
-      spd         raw hop distance, UNCAPPED, -1 for unreachable
-      spd_bucket  GRPE bias-table index via dataset_meta.spd_bucket_id
-      edge_type_id 0 = no edge, 1 = edge exists
+    Returns the raw hop-distance matrix, UNCAPPED, with -1 for unreachable.
 
-    Two bugs fixed here relative to the previous version, both of which silently corrupted
+    `spd_bucket` (the GRPE bias-table index) and `edge_type_id` are NOT returned or stored:
+    both are pure functions of this matrix, so caching them tripled the on-disk footprint
+    and made the cache stale whenever the bucketing scheme changed. cache.py derives them
+    on read via a 256-entry lookup table.
+
+    Two bugs fixed here relative to the original version, both of which silently corrupted
     the GRPE arm:
 
     1. Unreachable pairs were initialised to the cap and BFS ran with `cutoff=cap`, so a
@@ -114,35 +122,44 @@ def compute_spd_and_edge_buckets(edge_index, num_nodes):
     for src, lengths in nx.all_pairs_shortest_path_length(g):   # no cutoff: keep the tail
         for dst, d in lengths.items():
             spd[src, dst] = d
-    bucket = np.vectorize(spd_bucket_id, otypes=[np.int64])(spd)
-    edge_type_id = (spd == 1).astype(np.int64)
-    return torch.tensor(spd), torch.tensor(bucket), torch.tensor(edge_type_id)
+    return spd
+
+
+def _graph_records(ds):
+    """Yield (lap_pe, lap_eigvals, rwse, spd) per graph. A GENERATOR on purpose: the writer
+    consumes it one graph at a time, so no split is ever fully resident."""
+    for data in ds:
+        n = data.num_nodes
+        lap_pe, lap_eigvals = compute_lap_pe(data.edge_index, n)
+        rwse = compute_rwse(data.edge_index, n)
+        spd = compute_spd(data.edge_index, n)
+        yield lap_pe.numpy(), lap_eigvals.numpy(), rwse.numpy(), spd
 
 
 def process_dataset(name, out_dir):
+    """Precompute every PE for one dataset, once, streaming to disk.
+
+    All five variants are served from this single pass: LapPE and SignNet-PE from the
+    Laplacian eigenvectors (SignNet's sign-invariance lives in its learned encoder, not
+    here), RWSE from the random-walk return probabilities, GRPE from the all-pairs
+    distances, and No-PE from nothing at all.
+    """
     os.makedirs(out_dir, exist_ok=True)
     pyg_name = DATASET_NAME_MAP[name]
-    for split in ("train", "val", "test"):
+
+    meta = DATASETS.get(name, {})
+    if meta:
+        est = estimate_cache_bytes(
+            n_graphs=_APPROX_GRAPH_COUNT.get(name, 0),
+            avg_nodes=meta.get("avg_nodes", 0), k_lap=K_LAP, k_rwse=K_RWSE)
+        print(f"[{name}] estimated cache size ~{est['total_gb']:.1f} GB "
+              f"(dense term {est['dense_bytes'] / 1e9:.1f} GB, quadratic in node count)")
+
+    writer = PECacheWriter(out_dir, name, K_LAP, K_RWSE)
+    for split in SPLITS:
         ds = LRGBDataset(root=f"./raw_data/{pyg_name}", name=pyg_name, split=split)
-        split_records = []
-        for i, data in enumerate(ds):
-            n = data.num_nodes
-            lap_pe, lap_eigvals = compute_lap_pe(data.edge_index, n)
-            rwse = compute_rwse(data.edge_index, n)
-            spd, spd_bucket, edge_type_id = compute_spd_and_edge_buckets(data.edge_index, n)
-            split_records.append({
-                "lap_pe": lap_pe,
-                "lap_eigvals": lap_eigvals,
-                "rwse": rwse,
-                "signnet_in": lap_pe.clone(),  # SignNet encoder consumes raw eigenvectors
-                "spd": spd,                    # raw hop distance, uncapped, -1 = unreachable
-                "spd_bucket": spd_bucket,      # GRPE bias-table index
-                "edge_type_id": edge_type_id,
-            })
-            if (i + 1) % 500 == 0:
-                print(f"[{name}/{split}] {i + 1}/{len(ds)} graphs processed")
-        torch.save(split_records, os.path.join(out_dir, f"{split}_pe.pt"))
-        print(f"Saved {out_dir}/{split}_pe.pt ({len(split_records)} graphs)")
+        writer.write_split(split, _graph_records(ds), total=len(ds))
+    return writer.finalize()
 
 
 class SignNetEncoder(torch.nn.Module):

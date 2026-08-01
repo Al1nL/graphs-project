@@ -42,11 +42,15 @@ lrgb_pe_project/
 ├── requirements.txt
 ├── src/
 │   ├── pe/
-│   │   └── compute_pe.py         <- backbone-agnostic PE computation (the shared "ground truth")
+│   │   ├── compute_pe.py         <- backbone-agnostic PE computation (the shared "ground truth")
+│   │   └── cache.py              <- streaming writer + memory-mapped reader, versioned
 │   ├── adapters/
 │   │   ├── graphgps_adapter.py   <- maps PE tensors -> GraphGPS posenc_* config/format
 │   │   ├── san_adapter.py        <- maps PE tensors -> SAN's LPE input format
 │   │   └── graphormer_adapter.py <- maps PE tensors -> Graphormer spatial_pos/edge_input/attn-bias
+│   ├── config.py                 <- run schema (backbone x pe x dataset x seed) + version locking
+│   ├── dataset_meta.py           <- per-dataset caps, ρ windows, GRPE bucketing
+│   ├── calibration.py            <- target-node budget sweep + decision rule
 │   ├── sensitivity.py            <- backbone-agnostic Jacobian long-range sensitivity s̄(d),
 │   │                                plus the scale-free summaries (s̃(d), ρ) and the
 │   │                                graph-clustered bootstrap
@@ -61,7 +65,9 @@ lrgb_pe_project/
 ├── tests/                        <- pins the probe against a brute-force Jacobian.
 │                                    torch + networkx only; no GPU, dataset, or backbone.
 ├── scripts/
-│   ├── run_all.sh                <- loops over the full 3 x 5 x 3 grid, 3 seeds each
+│   ├── launch.py                 <- THE entry point: grid, seeding, pre-flight, CSV/W&B
+│   ├── calibrate_target_nodes.py <- one-off convergence check for the probe's T
+│   ├── run_all.sh                <- superseded by launch.py; kept for reference
 │   └── aggregate_results.py      <- Table 1 + figures; ρ is the primary statistic
 └── results/                      <- EMPTY. Filled by run_experiment.py after real runs.
 ```
@@ -140,18 +146,67 @@ conda env create -f envs/graphgps_env.yml
 conda env create -f envs/san_env.yml
 conda env create -f envs/graphormer_env.yml
 
-# 3. Precompute the shared PEs once per dataset (cached to disk, reused by all backbones)
+# 3. Pin the upstream commits in src/config.py PINNED_COMMITS (see "Version locking")
+git -C ../GraphGPS rev-parse HEAD    # paste into config.PINNED_COMMITS["gps"], etc.
+
+# 4. Precompute the shared PEs once per dataset (cached to disk, reused by all backbones)
 python src/pe/compute_pe.py --dataset peptides-func   --out cache/peptides-func/
 python src/pe/compute_pe.py --dataset peptides-struct --out cache/peptides-struct/
 python src/pe/compute_pe.py --dataset pascalvoc-sp    --out cache/pascalvoc-sp/
 
-# 4. Run one cell of the grid
-python src/run_experiment.py --backbone gps --pe rwse --dataset peptides-func --seed 0
+# 5. Calibrate the probe's target-node budget (once per backbone x dataset)
+python scripts/calibrate_target_nodes.py --backbone gps --dataset peptides-func --pe rwse
 
-# 5. Or run everything (45 cells x 3 seeds = 135 runs — budget compute accordingly;
-#    see docs/rationale.docx for a fallback reduced grid if compute is tight)
-bash scripts/run_all.sh
+# 6. Launch. --dry-run first; --resume to continue an interrupted grid.
+python scripts/launch.py --dry-run
+python scripts/launch.py --num-target-nodes 32 --preset reduced --wandb
 ```
+
+## Version locking
+
+Three things drift underneath this project, and each would silently invalidate results
+rather than break loudly:
+
+| Drifts | Locked by | Detected by |
+|---|---|---|
+| the three cloned upstream backbones | `config.PINNED_COMMITS` | `launch.py` pre-flight |
+| our PE computation | `config.PE_CACHE_VERSION` + cache manifest | `PECache` refuses a stale cache |
+| our analysis code | `config.repo_sha()` | recorded in every result row |
+
+`PINNED_COMMITS` starts as `None`, not `"main"` — a `None` is a checkable "nobody pinned
+this yet", whereas `"main"` is a lie that looks like a pin. A grid run half before and half
+after an upstream change is not a controlled comparison, so `launch.py` refuses to start
+until the pins are filled (override with `--no-strict-pins` for throwaway runs only).
+
+## PE cache format
+
+`compute_pe.py` streams one graph at a time to disk; nothing accumulates in memory, in
+either direction. This is not optional at LRGB scale:
+
+```
+PascalVOC-SP:  479 nodes^2 x 11,355 graphs = 2.6 GB   for ONE dense field, as uint8
+```
+
+Three decisions follow, all in `src/pe/cache.py`:
+
+- **Only `spd` is stored.** `spd_bucket` and `edge_type_id` are pure functions of it, so
+  storing them tripled the footprint to ~7.8 GB for nothing — and baking the bucket into
+  the cache is what made it go stale when the GRPE scheme changed. Both are derived on read
+  via a 256-entry lookup table, so the bucketing can now change without recomputing.
+- **uint8, 255 = unreachable.** Real diameters (~57 Peptides, ~27 VOC-SP) are far below the
+  ceiling, so nothing is capped; the writer raises rather than aliasing a large diameter
+  onto the sentinel.
+- **One file per graph, `mmap_mode="r"` on read.** The OS pages in only the graphs touched.
+
+## Sanity checks
+
+Every PE is checked against a **hand-calculated 10-node graph** (`tests/test_pe_sanity.py`)
+— closed forms, not values copied from a previous run of this code, since a golden-value
+test seeded from the implementation passes forever including when the implementation is
+wrong. The fixture is the 10-cycle, where all four have closed forms: Laplacian eigenvalues
+`1 - cos(2πk/10)`, RWSE return probability `C(2m,m)/2^{2m}` at even steps and 0 at odd ones,
+and `d(i,j) = min(|i-j|, 10-|i-j|)`. A path and a disconnected graph cover distinct degrees
+and unreachable pairs.
 
 ## Compute budget reality check
 
