@@ -28,6 +28,7 @@ from dataset_meta import (  # noqa: E402
     SPD_UNREACHABLE,
     abs_rho_window,
     max_dist,
+    min_max_dist_for_relative_tail,
     spd_bucket_id,
 )
 from sensitivity import (  # noqa: E402
@@ -40,14 +41,77 @@ from sensitivity import (  # noqa: E402
 
 # --------------------------------------------------------------------------- max_dist
 def test_max_dist_is_per_dataset_and_covers_more_than_the_old_cap():
-    """20 truncated Peptides (avg diameter 57) at roughly its first third."""
-    assert max_dist("peptides-func") == 40 > 20
+    """20 truncated Peptides (avg diameter 57) at roughly its first third.
+
+    The caps were later raised again from measured data (2026-07-29): the originals were
+    picked on the reasoning that far buckets would be backed by few graphs, but at 40 only
+    81% of Peptides graphs could reach their own relative-window tail (d >= 0.5*diam), so
+    the largest and longest-range 19% contributed nothing to relative rho.
+    """
+    assert max_dist("peptides-func") == 159 > 20
     assert max_dist("peptides-struct") == max_dist("peptides-func")   # same graphs
     # PascalVOC-SP has 3x the nodes but far shorter paths -- one cap cannot serve both
-    assert max_dist("pascalvoc-sp") < max_dist("peptides-func")
+    assert max_dist("pascalvoc-sp") == 54 < max_dist("peptides-func")
     for ds, meta in DATASETS.items():
         lo, hi = abs_rho_window(ds)
         assert 1 <= lo < hi <= meta["max_dist"], ds
+        # d_min approximates "top half of the median graph's diameter"
+        assert abs(lo - meta["median_diameter"] / 2) <= 2, ds
+
+
+def test_max_dist_equals_max_diameter_so_the_relative_tail_is_fully_sampled():
+    """The stronger requirement that replaced the >= D//2+1 invariant.
+
+    D//2+1 only guarantees a graph has AT LEAST ONE pair in the relative tail. Relative bin
+    b of a diameter-D graph covers ((b-1)/10*D, b/10*D], so a D=159 graph at max_dist=80
+    puts only d=80 in bin 6 and leaves bins 7..10 empty -- 14.8% of Peptides graphs, the
+    largest ones, with a partially sampled tail. Since rho = tail/total, dropping numerator
+    bins while the denominator stays dominated by bins 1..2 biases rho_rel DOWNWARD exactly
+    where the project expects the effect to be strongest.
+
+    max_dist == max_diameter makes coverage complete by construction, with no arbitrary
+    threshold to defend. It is nearly free: probe cost is per target node, not per bucket.
+    """
+    for ds, meta in DATASETS.items():
+        assert meta["max_dist"] == meta["max_diameter"], (
+            f"{ds}: max_dist={meta['max_dist']} != max_diameter={meta['max_diameter']}; "
+            "graphs larger than max_dist get a partially sampled relative tail")
+        # the reported ABSOLUTE window stays narrow and is unaffected -- long_range_fraction
+        # skips every bucket past d_max, so measuring wider does not change absolute rho
+        lo, hi = abs_rho_window(ds)
+        assert hi <= meta["max_dist"], ds
+
+
+def test_max_dist_satisfies_the_relative_tail_invariant():
+    """THE invariant: every graph must be able to reach its own relative-window tail.
+
+    A graph of diameter D has pairs in the relative window (d/diam > 0.5) only if the probe
+    measures out to at least D//2 + 1. If max_dist falls short, that graph contributes
+    nothing to relative rho -- and the graphs it excludes are the largest and longest-range
+    ones, a selection bias pointing exactly the wrong way for this project.
+
+    This is asserted against `max_diameter`, the exact maximum over EVERY split taken from
+    the built cache manifests. Deriving it from a sample was wrong twice: a 400-graph test
+    sample gave 146 for Peptides (true 159) and 36 for VOC-SP (true 54). Sample extrema are
+    systematically optimistic, and both were used to justify a cap.
+
+    Peptides sits at margin 0 (max_dist 80 == 159//2 + 1). That is exact rather than lucky
+    -- 159 is the true dataset maximum, not an estimate -- and this test is what keeps it
+    honest if the data or the cap ever changes.
+    """
+    for ds, meta in DATASETS.items():
+        need = min_max_dist_for_relative_tail(meta["max_diameter"])
+        assert meta["max_dist"] >= need, (
+            f"{ds}: max_dist={meta['max_dist']} but diameter-{meta['max_diameter']} graphs "
+            f"need >= {need} to have any pair in the relative window")
+        assert meta["max_diameter"] >= meta["median_diameter"] >= 1, ds
+
+
+def test_min_max_dist_for_relative_tail():
+    assert min_max_dist_for_relative_tail(159) == 80      # 79.5 -> first integer above
+    assert min_max_dist_for_relative_tail(54) == 28
+    assert min_max_dist_for_relative_tail(10) == 6        # d=6 is the first with 6/10 > 0.5
+    assert min_max_dist_for_relative_tail(1) == 1
 
 
 # --------------------------------------------------------------------------- relative axis

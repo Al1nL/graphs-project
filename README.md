@@ -83,8 +83,14 @@ amended proposal success criteria are in `docs/analysis-plan.md`.
 ρ is reported on two axes, with distinct jobs (`src/dataset_meta.py`):
 
 - **absolute `d`**, per-dataset windows — primary *within* a dataset; the axis
-  over-squashing theory is stated in. `max_dist` is 40 for Peptides (average diameter 57,
-  so the old cap of 20 saw its first third) and 28 for PascalVOC-SP.
+  over-squashing theory is stated in. Windows are **(26, 80)** for Peptides and
+  **(14, 36)** for PascalVOC-SP.
+- **`max_dist` = the dataset's full diameter** — **159** for Peptides, **54** for
+  PascalVOC-SP. This is a *measurement* cap, not a reporting one: measuring wider fills the
+  relative tail bins of the largest graphs, while `long_range_fraction` ignores every bucket
+  past the window's `d_max`, so absolute ρ is unchanged. Anything smaller leaves the biggest
+  graphs with partially sampled tails, which biases relative ρ **downward** precisely where
+  the effect is expected to be strongest (see `docs/analysis-plan.md`, Amendment 5).
 - **relative `d/diam(G)`**, one shared window — primary *across* datasets, and largely
   immune to the population shift whereby far buckets can only draw from graphs big enough
   to have them. Needs each graph's diameter in the result JSON.

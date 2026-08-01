@@ -196,10 +196,68 @@ This resolves the open decision recorded below, which is retained for the record
 
 Peptides has an average diameter of 57; capping the probe at 20 measured roughly its first
 third, on the dataset chosen precisely because it has long range. `max_dist` now comes from
-`src/dataset_meta.py`: **40** for Peptides-func/struct, **28** for PascalVOC-SP.
+`src/dataset_meta.py`.
 
-Not the full diameter, deliberately: buckets past ~40 are supported by a shrinking minority
-of graphs, so they cost compute for measurements that are both noisy and unrepresentative.
+**Revised 2026-07-29 from measured data.** The caps were initially 40 (Peptides) and 28
+(VOC-SP), argued from "buckets past there are backed by a shrinking minority of graphs."
+Once the real LRGB data was downloaded, `verify_diameters` plus a percentile sweep over 400
+test graphs per dataset showed that reasoning was wrong for Peptides, whose diameter
+distribution is heavily right-skewed:
+
+| | p25 | median | p75 | p90 | p95 | max (sample) | **max (true)** |
+|---|---|---|---|---|---|---|---|
+| Peptides | 36 | 51 | 66 | 95 | 116 | 146 | **159** |
+| VOC-SP | 26 | 28 | 29 | 30 | 31 | 36 | **54** |
+
+The two rightmost columns matter: sample extrema are systematically optimistic, and both
+were initially used to justify a cap. The true maxima come from the built PE cache
+manifests, over every split.
+
+At `max_dist=40`, 68% of Peptides graphs are truncated and only 81% can reach their own
+relative-window tail at all.
+
+### Revised again 2026-07-30 — `max_dist = max_diameter`
+
+An intermediate rule set `max_dist ≥ ⌊D_max/2⌋+1` (80 for Peptides, 36 for VOC-SP), which
+guarantees a graph has **at least one** pair in the relative tail. That is weaker than it
+sounds. Relative bin `b` of a diameter-`D` graph covers absolute distances
+`((b-1)/10·D, b/10·D]`, so a `D=159` graph at `max_dist=80` puts only `d=80` into bin 6 and
+leaves bins 7–10 empty. Measured over 600 Peptides test graphs, the share with **all five**
+tail bins populated:
+
+| `max_dist` | 40 | 80 | 90 | 100 | 159 |
+|---|---|---|---|---|---|
+| all 5 tail bins | 39.3% | 85.2% | 91.2% | 94.3% | **100%** |
+
+The 14.8% shortfall at 80 is a **bias**, not merely missing data. Since ρ = tail/total,
+dropping bins 7–10 removes numerator terms while the denominator stays dominated by bins
+1–2, pushing ρ_rel **down** — and it hits the largest, longest-range graphs, exactly where
+this project expects the effect to be strongest. Truncation suppresses the signal being
+looked for.
+
+Any value between 80 and the diameter is an arbitrary point on that curve. `max_diameter`
+is the one where coverage is complete by construction, so the caps are now **159**
+(Peptides) and **54** (VOC-SP).
+
+The **absolute** windows are unchanged at (26, 80) and (14, 36). `long_range_fraction`
+skips every bucket past `d_max`, so measuring to 159 yields exactly the same absolute ρ
+that `max_dist=80` would have. Far absolute buckets are deliberately excluded from that
+statistic — bucket `d=140` is backed by <5% of graphs, which is the population shift the
+relative axis exists to avoid. One measurement, two statistics, each over the range that
+suits it.
+
+Cost is negligible and the PE caches do **not** need rebuilding: after fix 1 the probe's
+work is per *target node* (the full Jacobian block is computed regardless of `max_dist`),
+and `max_dist` is a probe parameter, not a cache one.
+
+This required one dependent fix. `calibration.sweep_target_nodes` computed
+`min_bucket_count` as the minimum over *all* buckets, *per graph*. With `max_dist` at the
+full diameter the extreme buckets hold a handful of pairs from one or two of the largest
+graphs, so that minimum sits at ~1 and criterion (ii) would reject every rung, reporting
+non-convergence however dense the sampling. Verified directly: 1 under the old rule versus
+30 under the new one. It is now the minimum over **pooled** counts within `[d_min, d_max]`
+— the correct scope regardless of `max_dist`, since a bucket outside the reported window
+feeds no statistic.
 
 ### 5b. Two axes, two jobs
 

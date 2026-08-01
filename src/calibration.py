@@ -38,6 +38,7 @@ import time
 from typing import Callable, Dict, List, Sequence
 
 from sensitivity import (
+    average_curves,
     bootstrap_over_graphs,
     compute_sensitivity_curve,
     long_range_fraction,
@@ -103,9 +104,24 @@ def sweep_target_nodes(
             return long_range_fraction(c, _lo, _hi, _w)
 
         rho, lo, hi = bootstrap_over_graphs(per_graph, stat, n_boot=n_boot, seed=seed)
+        pooled = average_curves(per_graph)
         pooled_tail = sum(
             sum(b["count"] for d, b in c.items() if d_min <= d <= d_max) for c in per_graph
         )
+        # Density of the SPARSEST bucket THAT IS ACTUALLY REPORTED, pooled across graphs.
+        #
+        # Two things this deliberately does not do. It does not take the minimum over all
+        # buckets: with max_dist == max_diameter, the extreme buckets (d near 159 on
+        # Peptides) are populated by a handful of pairs from one or two of the largest
+        # graphs, so an all-bucket minimum would sit at ~1 forever and criterion (ii) would
+        # reject every rung, reporting non-convergence no matter how dense the sampling. And
+        # it does not take a per-graph minimum: rho is computed on the POOLED curve, so
+        # pooled counts are what determine whether a reported bucket is estimable.
+        #
+        # Restricting to [d_min, d_max] is the correct scope regardless of max_dist -- a
+        # bucket outside the reported window contributes to no statistic, so its emptiness
+        # says nothing about whether T is large enough.
+        in_window = [b["count"] for d, b in pooled.items() if d_min <= d <= d_max]
         # T saturates once it exceeds a graph's node count: randperm(n)[:T] returns all n
         # nodes, so larger T buys nothing there and the curve flattens for the wrong reason.
         n_saturated = sum(1 for g in graphs if t >= g.num_nodes)
@@ -117,10 +133,8 @@ def sweep_target_nodes(
             "ci_width": hi - lo,
             "n_graphs": len(graphs),
             "pairs_in_window": pooled_tail,
-            "min_bucket_count": min(
-                (min((b["count"] for b in c.values()), default=0) for c in per_graph),
-                default=0,
-            ),
+            "min_bucket_count": min(in_window) if in_window else 0,
+            "n_buckets_in_window": len(in_window),
             "graphs_saturated": n_saturated,
             "seconds": time.time() - started,
         }

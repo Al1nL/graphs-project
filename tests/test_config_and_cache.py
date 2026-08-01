@@ -85,8 +85,9 @@ def test_run_config_derives_paths_and_per_dataset_max_dist():
     assert c.result_path == os.path.join("out", "san_grpe_pascalvoc-sp_seed2.json")
     assert c.resolved_cache_dir == os.path.join("cache", "pascalvoc-sp")
     assert c.metric_name == "macro_f1"
-    assert c.resolved_max_dist() == 28                     # from dataset_meta, not 20
-    assert RunConfig("gps", "none", "peptides-func", 0).resolved_max_dist() == 40
+    # from dataset_meta, set from MEASURED diameter percentiles (not the paper average)
+    assert c.resolved_max_dist() == 54
+    assert RunConfig("gps", "none", "peptides-func", 0).resolved_max_dist() == 159
 
 
 class _FakeRepo:

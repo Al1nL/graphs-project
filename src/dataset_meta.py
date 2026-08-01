@@ -22,9 +22,12 @@ measures roughly its first third -- on the dataset chosen precisely because it h
 range. Worse, rho computed over d in [5, 20] is then a MID-range statistic wearing a
 long-range label.
 
-`max_dist` is therefore set per dataset. It is not set to the full diameter: buckets past
-~40 are supported by a shrinking minority of graphs (see the population-shift note below),
-so they cost compute for measurements that are simultaneously noisy and unrepresentative.
+`max_dist` is therefore set per dataset, to that dataset's exact max diameter, so that
+every graph can populate its whole relative tail (see the DATASETS comment for the
+measured coverage). Measuring that far does NOT mean reporting that far: buckets past
+~40 are supported by a shrinking minority of graphs (see the population-shift note
+below), so the reported ABSOLUTE window stops well short of the cap. The cap is a
+measurement range; the window is a reporting choice, applied post-hoc.
 
 --------------------------------------------------------------------------------------
 The population-shift problem, and why the relative axis is primary
@@ -60,25 +63,106 @@ import math
 # from the actual data. Re-run that before trusting the numbers in a paper; do not treat
 # these literals as measurements.
 # ---------------------------------------------------------------------------
+# MEASURED 2026-07-29 on 400 test graphs per dataset (verify_diameters + percentiles),
+# after downloading the real LRGB data. The quoted paper figures were accurate on average
+# -- Peptides 56.5 vs 57, VOC-SP 27.7 vs 27 -- but the AVERAGE was the wrong summary to
+# design around for Peptides, whose diameter distribution is heavily right-skewed:
+#
+#   Peptides   p25 36   median 51   p75 66   p90 95   p95 116   max 146
+#   VOC-SP     p25 26   median 28   p75 29   p90 30   p95  31   max  36
+#
+# max_dist was originally 40 (Peptides) and 28 (VOC-SP), chosen on the reasoning that
+# buckets past those points would be backed by a shrinking minority of graphs. The data
+# says otherwise: at 40, 68% of Peptides graphs are truncated, and -- the serious part --
+# only 81% of them can reach their own relative-window tail (d >= 0.5*diam). The other 19%
+# contribute NOTHING to relative rho, and they are the largest, longest-range graphs in the
+# set. That is a selection bias pointing exactly the wrong way for this paper.
+#
+# The caps below are the smallest round values at which every graph can reach its relative
+# tail (Peptides 80 -> 100%, VOC-SP 36 -> 100% and nothing truncated at all).
+#
+# Raising them is nearly free: after the fix-1 restructuring the probe's cost is per TARGET
+# NODE, not per distance bucket -- the full Jacobian block is computed regardless, so a
+# larger cap only populates more buckets from work already done.
+# `max_diameter` is the exact maximum over EVERY split, taken from the built PE cache
+# manifests (2026-07-29), not from a sample. That distinction cost two mistakes:
+#
+#   sampled 400 test graphs     true (all splits)
+#   Peptides  max 146            max 159
+#   VOC-SP    max  36            max  54
+#
+# Both sample maxima were low, and both were used to justify a cap. VOC-SP's was described
+# as "the observed maximum: truncates nothing" -- false, since graphs of diameter 37..54
+# exist and are truncated on the absolute axis. Sample-derived extrema are systematically
+# optimistic; only the whole-dataset value can license a claim about "every graph".
+#
+# max_dist == max_diameter: measure the FULL diameter, report over a narrower window.
+#
+# The earlier rule (max_dist >= max_diameter//2 + 1) guarantees only that a graph has AT
+# LEAST ONE pair in the relative tail -- not that the tail is sampled. Relative bin b of a
+# diameter-D graph covers absolute distances ((b-1)/10*D, b/10*D], so a D=159 graph at
+# max_dist=80 puts only d=80 into bin 6 and leaves bins 7..10 empty. Measured on 600
+# Peptides test graphs, the share of graphs with ALL FIVE tail bins populated was:
+#
+#     max_dist   40      80      90     100     159
+#     coverage  39.3%   85.2%   91.2%   94.3%  100.0%
+#
+# The 14.8% shortfall at 80 is a BIAS, not just missing data: rho = tail/total, so dropping
+# bins 7..10 removes numerator terms while the denominator stays dominated by bins 1..2,
+# pushing rho_rel DOWN. It hits the largest, longest-range graphs -- exactly where this
+# project expects the effect to be strongest. Truncation suppresses the signal being
+# looked for.
+#
+# Any cap between 80 and the diameter is an arbitrary point on that curve. max_diameter is
+# the one value where coverage is complete by construction, so that is what is used.
+#
+# This costs essentially nothing. The probe's work is per TARGET NODE -- the full Jacobian
+# block is computed regardless of max_dist -- and the BFS cutoff is trivial either way. The
+# PE caches do NOT need rebuilding: max_dist is a probe parameter, not a cache one.
+#
+# The ABSOLUTE window stays narrow and is unaffected. long_range_fraction skips every
+# bucket past d_max, so measuring to 159 and reporting over (26, 80) gives exactly the same
+# absolute rho that max_dist=80 would have. Far absolute buckets are deliberately excluded
+# from that statistic: bucket d=140 is backed by <5% of graphs, which is the population
+# shift the relative axis exists to avoid.
 DATASETS = {
     "peptides-func": {
-        "avg_nodes": 151,
-        "avg_diameter": 57,        # proposal, Dataset section
-        "max_dist": 40,            # MEASUREMENT cap; see module docstring for why not 57
-        "abs_rho_window": (20, 40),
+        "avg_nodes": 150,          # measured 150.0 (paper: 151)
+        "avg_diameter": 57,        # measured 56.5; median 51, p90 95
+        "median_diameter": 51,
+        "max_diameter": 159,       # exact, all splits, from the cache manifest
+        "max_dist": 159,           # == max_diameter: relative tail complete for every graph
+        "abs_rho_window": (26, 80),   # reported window; d_min ~ half the MEDIAN diameter
     },
     "peptides-struct": {           # same graphs as peptides-func, different task
-        "avg_nodes": 151,
+        "avg_nodes": 150,
         "avg_diameter": 57,
-        "max_dist": 40,
-        "abs_rho_window": (20, 40),
+        "median_diameter": 51,
+        "max_diameter": 159,
+        "max_dist": 159,
+        "abs_rho_window": (26, 80),
     },
     "pascalvoc-sp": {
-        "avg_nodes": 480,
-        "avg_diameter": 27,        # superpixel graphs: many more nodes, far shorter paths
-        "max_dist": 28,
-        "abs_rho_window": (10, 28),
+        "avg_nodes": 480,          # measured 480.4
+        "avg_diameter": 28,        # measured 27.7; tight -- median 28
+        "median_diameter": 28,
+        "max_diameter": 54,        # exact, all splits (a 400-graph sample said 36)
+        # Raised 36 -> 54 for the SAME reason as Peptides, though the request named only
+        # Peptides: at 36, graphs of diameter 37..54 had partially sampled relative tails
+        # and the identical downward bias. Leaving one dataset with a defect just argued to
+        # be unacceptable in the other would be incoherent. Revert to 36 if unwanted.
+        "max_dist": 54,
+        "abs_rho_window": (14, 36),   # reported window unchanged
     },
+}
+
+# Node-feature width per dataset, MEASURED from the downloaded data. This is the
+# `n_shared_feats` the Jacobian is taken over, and it must be identical across all five PE
+# variants (sensitivity.assert_shared_width).
+NODE_FEATURE_DIM = {
+    "peptides-func": 9,
+    "peptides-struct": 9,
+    "pascalvoc-sp": 14,
 }
 
 # Relative-distance binning, shared by all datasets -- this is what makes rho comparable
@@ -134,6 +218,27 @@ def spd_bucket_id(d: int) -> int:
     return min(SPD_EXACT_UPTO + 1 + int(scaled * n_log), SPD_UNREACHABLE - 1)
 
 
+def min_max_dist_for_relative_tail(max_diameter: int) -> int:
+    """Smallest `max_dist` giving every graph AT LEAST ONE pair in the relative tail.
+
+    NECESSARY BUT NOT SUFFICIENT, and no longer the rule in force -- `max_dist` is now set
+    to `max_diameter` outright (see the DATASETS comment). Retained as a floor and as a
+    diagnostic, since it marks the point below which a graph drops out of relative rho
+    *entirely* rather than merely being under-sampled.
+
+    Why it is too weak: the relative window is d/diam(G) > 0.5, so a diameter-D graph needs
+    d >= floor(D/2) + 1 for any pair at all -- but relative bin b spans
+    ((b-1)/10*D, b/10*D], so satisfying this bound only fills bin 6. A D=159 graph at
+    max_dist=80 gets exactly one distance (d=80) in bin 6 and nothing in bins 7..10. It is
+    counted as "reaching its tail" while contributing a fifth of one.
+
+    Evaluate against the WHOLE dataset's max diameter, never a sample: a 400-graph sample
+    gave 146 for Peptides (true 159) and 36 for VOC-SP (true 54), and both were used to
+    justify a cap. Asserted in tests/test_distance_axis.py against the recorded value.
+    """
+    return max_diameter // 2 + 1
+
+
 def max_dist(dataset: str) -> int:
     return DATASETS[dataset]["max_dist"]
 
@@ -145,9 +250,11 @@ def abs_rho_window(dataset: str):
 def verify_diameters(dataset: str, graphs, sample=256):
     """Recompute diameter statistics from actual graphs and compare to the literals above.
 
-    The `avg_diameter` entries are quoted from papers, and `max_dist` is derived from them.
-    If the real distribution differs, `max_dist` is truncating (or wasting compute on) the
-    wrong range. Run this once per dataset before the main grid.
+    The `avg_diameter` entries are quoted from papers; `max_diameter` and `max_dist` are
+    measured, taken from the built cache manifests over every split. This function is what
+    checks the quoted averages against reality -- and it is what showed the average was the
+    wrong summary to design around, since Peptides' distribution is heavily right-skewed.
+    Run it once per dataset before the main grid.
 
     Returns a dict with the measured stats and the fraction of graphs whose diameter
     exceeds `max_dist` -- i.e. how much range the probe is choosing not to look at.

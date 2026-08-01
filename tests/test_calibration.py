@@ -224,6 +224,45 @@ def test_sweep_runs_and_returns_one_row_per_rung():
     assert rows[0]["pairs_in_window"] < rows[2]["pairs_in_window"]
 
 
+def test_min_bucket_count_is_scoped_to_the_reported_window():
+    """Guards the bug that max_dist == max_diameter would otherwise have triggered.
+
+    With max_dist raised to the full diameter, the extreme buckets (d near 159 on Peptides)
+    hold a handful of pairs contributed by one or two of the largest graphs. A
+    min_bucket_count taken over ALL buckets would therefore sit at ~1 no matter how dense
+    the sampling, criterion (ii) would reject every rung, and the calibration would report
+    non-convergence forever.
+
+    Scoping to [d_min, d_max] is correct independently of max_dist: a bucket outside the
+    reported window feeds no statistic, so its sparseness says nothing about whether T is
+    big enough.
+    """
+    import types
+
+    torch.manual_seed(0)
+    n = 30
+    edges = [[i, i + 1] for i in range(n - 1)]
+    ei = torch.tensor(edges + [[b, a] for a, b in edges]).t()
+    adj = torch.zeros(n, n)
+    adj[ei[0], ei[1]] = 1.0
+    adj = adj / adj.sum(1, keepdim=True).clamp(min=1)
+    data = types.SimpleNamespace(x=torch.randn(n, 6), edge_index=ei, num_nodes=n)
+    lin = torch.nn.Linear(6, 8)
+    factory = lambda d: (lambda x: torch.tanh(adj @ torch.tanh(lin(x))))  # noqa: E731
+
+    # a path graph: bucket d=29 holds exactly one pair per graph, buckets near d=1 hold many
+    rows = sweep_target_nodes(
+        factory, [data] * 3, n_shared_feats=4, ladder=(8,),
+        max_dist=29, d_min=3, d_max=10, n_boot=20, verbose=False,
+    )
+    r = rows[0]
+    assert r["n_buckets_in_window"] == 8            # d = 3..10
+    # the extreme buckets (d up to 29) are far sparser than anything in [3, 10]; if they
+    # leaked into the statistic this would collapse toward 1
+    assert r["min_bucket_count"] > 1, r["min_bucket_count"]
+    assert r["min_bucket_count"] >= 3, "buckets inside the window must be well populated"
+
+
 def test_sweep_rejects_bad_input():
     for bad in ([], None):
         try:
