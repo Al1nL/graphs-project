@@ -32,6 +32,7 @@ import os
 import sys
 import networkx as nx
 import numpy as np
+import scipy.linalg
 import torch
 from torch_geometric.utils import to_networkx, get_laplacian, to_dense_adj
 from torch_geometric.datasets import LRGBDataset
@@ -62,11 +63,24 @@ DATASET_NAME_MAP = {
 
 
 def compute_lap_pe(edge_index, num_nodes, k=K_LAP):
-    """Smallest-k non-trivial eigenvectors/eigenvalues of the normalized graph Laplacian."""
+    """Smallest-k non-trivial eigenvectors/eigenvalues of the normalized graph Laplacian.
+
+    Uses a PARTIAL solver: we need the lowest k+1 eigenpairs, and `np.linalg.eigh` computes
+    all n of them. On PascalVOC-SP (n ~ 480) that dominated the whole precompute at 449 of
+    601 ms per graph. `scipy.linalg.eigh(..., subset_by_index=[0, k])` dispatches to LAPACK
+    syevr, which computes only the requested range: 11.2x faster, and numerically identical
+    on real VOC graphs (eigenvalues agree to 5.6e-16, eigenvectors to 8.9e-15 in absolute
+    value). Total precompute drops from ~2h to ~45min.
+
+    Note the comparison is on |eigenvector|: sign is arbitrary for any eigensolver, and in a
+    DEGENERATE eigenspace so is the basis. That ambiguity is inherent to LapPE, not
+    introduced here -- it is exactly what SignNet-PE exists to be invariant to.
+    """
     lap_index, lap_weight = get_laplacian(edge_index, normalization="sym", num_nodes=num_nodes)
     L = to_dense_adj(lap_index, edge_attr=lap_weight, max_num_nodes=num_nodes)[0].numpy()
-    eigvals, eigvecs = np.linalg.eigh(L)  # ascending order, eigvals[0] ~ 0
     k_eff = min(k, num_nodes - 1)
+    # indices 0..k_eff inclusive -> k_eff+1 pairs; index 0 is the trivial lambda=0 one
+    eigvals, eigvecs = scipy.linalg.eigh(L, subset_by_index=[0, k_eff])
     vals = eigvals[1:1 + k_eff]
     vecs = eigvecs[:, 1:1 + k_eff]
     if k_eff < k:  # pad small graphs

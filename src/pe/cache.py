@@ -121,11 +121,14 @@ class PECacheWriter:
                 self.bytes += arr.nbytes
             n_written = i + 1
             if n_written % 500 == 0:
+                # flush: stdout is block-buffered when redirected to a file, so without
+                # this a 30-minute PascalVOC-SP build shows no progress at all until it
+                # exits -- exactly when progress output is most wanted.
                 print(f"[{self.dataset}/{split}] {n_written}"
                       f"{'/' + str(total) if total else ''} graphs -> "
-                      f"{self.bytes / 1e9:.2f} GB")
+                      f"{self.bytes / 1e9:.2f} GB", flush=True)
         self.counts[split] = n_written
-        print(f"[{self.dataset}/{split}] done: {n_written} graphs")
+        print(f"[{self.dataset}/{split}] done: {n_written} graphs", flush=True)
 
     def finalize(self):
         manifest = {
