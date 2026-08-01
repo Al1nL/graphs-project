@@ -53,13 +53,15 @@ def build_config(backbone: str, pe: str, dataset: str, cache_dir: str) -> dict:
     raise ValueError(backbone)
 
 
-def graphgps_train(config, dataset, seed):
-    raise NotImplementedError(
-        "Point this at GraphGPS's own training entry point (e.g. adapt "
-        "GraphGPS/main.py's run_loop_settings) once GraphGPS is cloned locally. "
-        "This stub exists so run_experiment.py's CLI/orchestration logic can be reviewed "
-        "and unit-tested independently of any single backbone repo being present."
-    )
+def graphgps_train(run_cfg, dataset=None, seed=None):
+    """Train one grid cell with GraphGPS. Delegates to backends/graphgps_backend.py.
+
+    Imported lazily: GraphGPS needs its own environment (yacs, pytorch_lightning, its
+    pinned PyG), so importing at module scope would break the launcher's --dry-run and the
+    whole test suite on any machine that has not set that env up.
+    """
+    from backends.graphgps_backend import graphgps_train as _train
+    return _train(run_cfg)
 
 
 def san_train(config, dataset, seed):
@@ -97,14 +99,21 @@ def make_model_fn(trained_model, backbone: str, data, pe_record):
 
     Return the final-layer NODE embeddings [n, p] -- not pooled graph embeddings, and not
     task logits: s_bar(d) is defined on h_v^(L).
+
+    Returns (model_fn, probe_data, meta). `probe_data` is what to hand the probe: its `.x`
+    is h^(0), the node representation AFTER the feature encoder, because LRGB node features
+    are integer atom indices and d h / d x is undefined for a discrete index. `meta` carries
+    the candidate input widths -- see graphgps_backend.probe_widths for why there is more
+    than one and why the choice is not free.
     """
+    if backbone == "gps":
+        from backends.graphgps_backend import make_gps_model_fn
+        return make_gps_model_fn(trained_model, data)
     raise NotImplementedError(
-        "Implement per backbone once its repo is cloned: run the trained model's forward "
-        "pass up to (and excluding) the task head, returning node embeddings. For GraphGPS "
-        "this is the GPSModel layer stack before `post_mp`; for SAN, the output of the "
-        "final SAN layer before readout; for Graphormer, the last encoder layer's token "
-        "states with the virtual/graph token dropped. See make_model_fn's docstring for "
-        "the two constraints the wrapper must satisfy."
+        f"make_model_fn is implemented for 'gps' only; '{backbone}' still needs its repo "
+        "cloned and forked. For SAN this is the output of the final SAN layer before "
+        "readout; for Graphormer, the last encoder layer's token states with the "
+        "virtual/graph token dropped. Both must satisfy the two constraints above."
     )
 
 
