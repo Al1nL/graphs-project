@@ -6,11 +6,14 @@ reimplementation of GraphGPS / SAN / Graphormer: it wraps the three official cod
 adds (a) a shared PE-precomputation module so every backbone sees the *same* PE definitions,
 and (b) a shared, backbone-agnostic long-range sensitivity probe.
 
-> **Sandbox note:** this was written and organized in an environment with no GPU and no
-> network egress, so it has not been executed end-to-end here. Treat it as a ready-to-run
-> scaffold for your own machine (see "Environment setup"). Syntax/import paths were checked
-> by hand against each library's documented API as of early 2026 — re-verify against the
-> exact commit you clone before a real run, since upstream repos do drift.
+> **Status note:** the real LRGB data is downloaded and all three PE caches are built and
+> verified; the probe, the calibration tool and the GraphGPS integration have been run
+> against real graphs. What has *not* happened is a training run — no model has been
+> trained, `results/` is empty, and there is no GPU here, so every number in the paper is
+> still ahead of us. See "Implementation status" for what is wired and what is a stub.
+> Import paths for the not-yet-cloned backbones were checked by hand against each library's
+> documented API as of early 2026 — re-verify against the exact commit you clone, since
+> upstream repos drift.
 
 ## Why this structure
 
@@ -37,7 +40,7 @@ vary two axes independently:
 ## Repository layout
 
 ```
-lrgb_pe_project/
+graphs-project/
 ├── README.md                     <- you are here
 ├── requirements.txt
 ├── src/
@@ -48,6 +51,9 @@ lrgb_pe_project/
 │   │   ├── graphgps_adapter.py   <- maps PE tensors -> GraphGPS posenc_* config/format
 │   │   ├── san_adapter.py        <- maps PE tensors -> SAN's LPE input format
 │   │   └── graphormer_adapter.py <- maps PE tensors -> Graphormer spatial_pos/edge_input/attn-bias
+│   ├── backends/
+│   │   └── graphgps_backend.py   <- REAL integration: drives GraphGPS's own train loop, and
+│   │                                wraps a trained GPSModel for the Jacobian probe
 │   ├── config.py                 <- run schema (backbone x pe x dataset x seed) + version locking
 │   ├── dataset_meta.py           <- per-dataset caps, ρ windows, GRPE bucketing
 │   ├── calibration.py            <- target-node budget sweep + decision rule
@@ -69,8 +75,44 @@ lrgb_pe_project/
 │   ├── calibrate_target_nodes.py <- one-off convergence check for the probe's T
 │   ├── run_all.sh                <- superseded by launch.py; kept for reference
 │   └── aggregate_results.py      <- Table 1 + figures; ρ is the primary statistic
-└── results/                      <- EMPTY. Filled by run_experiment.py after real runs.
+├── raw_data/                     <- gitignored, 5.2 GB. LRGB downloads; see setup step 4.
+├── cache/                        <- gitignored, 5.0 GB. Built PE caches, one file per graph.
+└── results/                      <- EMPTY, and not in a fresh clone; run_experiment.py
+                                     creates it. Filled after real runs.
 ```
+
+## Implementation status
+
+The shared machinery — PE computation and cache, the sensitivity probe, calibration,
+aggregation, the launcher — is complete and tested. The per-backbone training integrations
+are not, and that is the critical path:
+
+| backbone | training | probe wrapper | notes |
+|---|---|---|---|
+| GraphGPS | **wired** (4 of 5 PEs) | **wired** | `src/backends/graphgps_backend.py`; GRPE refused, see below |
+| SAN | stub | stub | repo not cloned or forked yet |
+| Graphormer | stub | stub | repo not cloned or forked yet |
+
+`graphgps_train` drives GraphGPS's **own** run loop, starting from its tuned reference YAML
+for the dataset and overriding only the PE block, so every arm differs in exactly one thing.
+`make_gps_model_fn` runs a trained `GPSModel` up to — but not including — the task head and
+returns node embeddings. Both import GraphGPS lazily, so `--dry-run` and the whole test
+suite work on a machine with no GraphGPS environment.
+
+Two things to know before trusting cross-PE numbers from the GraphGPS arm:
+
+- **GraphGPS+GRPE raises rather than running.** GraphGPS has no native attention-bias hook,
+  so GRPE needs `GPSLayer`'s self-attention replaced by
+  `adapters.graphgps_adapter.GRPEBiasedAttention` and the `spd_bucket`/`edge_type` tensors
+  threaded onto the batch. That is an architectural addition, not a config change, and is
+  left for a separate pass; the other four arms are drop-ins.
+- **The content width differs per PE, and this is not fixable in the probe.** GraphGPS holds
+  `dim_inner` constant and makes room for the PE by *shrinking* the atom encoder, so at
+  `dim_inner=96` the content channels measure 96 / 80 / 76 / 64 / 96 for
+  No-PE / LapPE / RWSE / SignNet / GRPE. Slicing to content compares ‖J‖_F over different
+  column counts (which `assert_shared_width` correctly refuses); using the full `dim_inner`
+  is identical across arms but perturbs PE channels too. `probe_widths` returns both and
+  takes no side — the choice belongs in the paper, not hidden in a wrapper.
 
 ## Reporting the sensitivity results
 
@@ -97,11 +139,13 @@ amended proposal success criteria are in `docs/analysis-plan.md`.
 
 GRPE's spatial-bias table is a **model** parameter and moves with this: it uses T5-style
 bucketing (exact to d=8, log-spaced to 128, plus a dedicated *unreachable* bucket) rather
-than a hard cap, so measuring out to d=40 does not make GRPE's tail an artefact of the cap.
-Changing it requires re-training the GRPE cells.
+than a hard cap, so measuring out to `max_dist` (159 on Peptides) does not make GRPE's tail
+an artefact of the cap. Changing it requires re-training the GRPE cells.
 
 ```bash
-python -m pytest tests/                     # or: python tests/test_sensitivity.py
+python tests/test_sensitivity.py            # each tests/test_*.py is a standalone script;
+                                            # pytest also collects them, but it is not a
+                                            # dependency and is not in requirements.txt
 python scripts/aggregate_results.py         # --d-min/--d-max to test window sensitivity
 ```
 
@@ -224,9 +268,10 @@ Three decisions follow, all in `src/pe/cache.py`:
   storing them tripled the footprint to ~7.8 GB for nothing — and baking the bucket into
   the cache is what made it go stale when the GRPE scheme changed. Both are derived on read
   via a 256-entry lookup table, so the bucketing can now change without recomputing.
-- **uint8, 255 = unreachable.** Real diameters (~57 Peptides, ~27 VOC-SP) are far below the
-  ceiling, so nothing is capped; the writer raises rather than aliasing a large diameter
-  onto the sentinel.
+- **uint8, 255 = unreachable.** The number that matters here is the *maximum* diameter, not
+  the average: measured over every split from the built caches it is **159** (Peptides) and
+  **54** (VOC-SP), both far below the sentinel, so nothing is capped. The writer raises
+  rather than aliasing a large diameter onto 255.
 - **One file per graph, `mmap_mode="r"` on read.** The OS pages in only the graphs touched.
 
 ## Sanity checks
