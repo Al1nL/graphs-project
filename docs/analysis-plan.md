@@ -263,7 +263,7 @@ feeds no statistic.
 
 | Axis | Window | Role |
 |---|---|---|
-| absolute `d` | per dataset — (20, 40) Peptides, (10, 28) VOC-SP | primary **within** a dataset; the axis over-squashing theory (ref [7]) is stated in |
+| absolute `d` | per dataset — (26, 80) Peptides, (14, 36) VOC-SP | primary **within** a dataset; the axis over-squashing theory (ref [7]) is stated in |
 | relative `d/diam(G)` | bins 6–10 of 10, i.e. `d/diam > 0.5`, shared | primary **across** datasets; the axis ρ is ranked on |
 
 Absolute ρ is deliberately *not* comparable across datasets, because the windows differ.
