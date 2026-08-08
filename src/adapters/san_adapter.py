@@ -26,6 +26,10 @@ is exactly our `lap_pe`/`lap_eigvals` cache fields, so LapPE is a near-faithful 
   reported separately so it isn't silently compared as if it were stock SAN.
 """
 
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from dataset_meta import SPD_NUM_BUCKETS  # noqa: E402
+
 import torch
 import torch.nn as nn
 
@@ -61,11 +65,11 @@ class SANGammaGRPEBias(nn.Module):
     reviewer can diff exactly what changed relative to stock SAN.
     """
 
-    def __init__(self, num_heads, spd_cap=20, num_edge_types=2):
+    def __init__(self, num_heads, num_spd_buckets=SPD_NUM_BUCKETS, num_edge_types=2):
         super().__init__()
-        self.b_spd = nn.Parameter(torch.zeros(num_heads, spd_cap + 1))
+        self.b_spd = nn.Parameter(torch.zeros(num_heads, num_spd_buckets))
         self.b_edge = nn.Parameter(torch.zeros(num_heads, num_edge_types))
 
-    def forward(self, scores, spd, edge_type_id):
-        spd_clamped = spd.clamp(max=self.b_spd.shape[1] - 1)
-        return scores + self.b_spd[:, spd_clamped] + self.b_edge[:, edge_type_id]
+    def forward(self, scores, spd_bucket, edge_type_id):
+        # spd_bucket is pre-bucketed by dataset_meta.spd_bucket_id; see graphgps_adapter.
+        return scores + self.b_spd[:, spd_bucket] + self.b_edge[:, edge_type_id]
