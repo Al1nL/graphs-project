@@ -25,7 +25,7 @@ shift 2
 # Defaults. See scripts/slurm/README.md for what each partition actually means on this
 # cluster and why studentbatch is the default here.
 # ---------------------------------------------------------------------------
-PARTITION="studentbatch"      # 3-day limit, batch jobs, capped at 6 PER USER -- this ONE
+PARTITION="studentkillable"      # 3-day limit, batch jobs, capped at 6 PER USER -- this ONE
                               # array submission counts as one of those six, not 45
 THROTTLE=4                   # max concurrent array tasks (`--array=0-44%THROTTLE`)
 ARRAY_RANGE="0-44"            # override with --array-range if running a partial grid
@@ -34,10 +34,12 @@ RESULTS_DIR="results"
 NUM_PROBE_GRAPHS=""
 PE_LIST=""                    # non-empty -> filters run_grid.slurm's PES array client-side
 DRY_RUN=0
+ACCOUNT="gpu-students"
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --partition=*) PARTITION="${1#*=}" ;;
+    --account=*) ACCOUNT="${1#*=}" ;;
     --throttle=*) THROTTLE="${1#*=}" ;;
     --array-range=*) ARRAY_RANGE="${1#*=}" ;;
     --constraint=*) CONSTRAINT="${1#*=}" ;;

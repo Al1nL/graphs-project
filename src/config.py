@@ -84,7 +84,7 @@ PINNED_COMMITS = {
 # could possibly sit.
 FORK_URLS = {
     "gps": "https://github.com/pazflashner/GraphGPS.git",
-    "san": None,
+    "san": "https://github.com/Al1nL/SAN.git",
     "graphormer": None,
 }
 
