@@ -207,6 +207,50 @@ class RunConfig:
     num_probe_graphs: Optional[int] = None   # None -> config.PROBE_N_GRAPHS
     max_dist: Optional[int] = None           # defaults per dataset from dataset_meta
     epochs: Optional[int] = None             # None -> backbone config's own value
+    batch_size: Optional[int] = None         # None -> backbone's own per-dataset default
+                                              # (e.g. san_backend.BASE_NET_PARAMS); set this
+                                              # to override without editing source, e.g. when
+                                              # probing how low a card's OOM ceiling needs it
+    edge_budget: Optional[int] = None        # SAN full_graph=True only (see
+                                              # san_backend.EdgeBudgetBatchSampler). None ->
+                                              # backbone's own per-dataset default; a
+                                              # positive int overrides it; 0 explicitly
+                                              # disables edge-budget batching, falling back
+                                              # to plain fixed batch_size.
+    max_nodes: Optional[int] = None          # SAN full_graph=True only: exclude graphs
+                                              # with more nodes than this from every split
+                                              # (see san_backend._build_loaders). A
+                                              # DISCLOSED compromise, not a silent one --
+                                              # logs excluded count/fraction. None -> use
+                                              # backbone's own default (usually none); a
+                                              # positive int sets/overrides the threshold;
+                                              # 0 explicitly disables filtering.
+    accumulation_steps: Optional[int] = None # SAN only: accumulate gradients over this
+                                              # many physical mini-batches before each
+                                              # optimizer step, recovering a larger
+                                              # EFFECTIVE batch's training statistics at a
+                                              # small PHYSICAL (memory) batch size. Does
+                                              # NOT reduce peak memory -- see san_train's
+                                              # accumulation_steps for why it's a separate
+                                              # axis from batch_size/edge_budget. None ->
+                                              # backbone's own default (usually 1, i.e. off).
+    epochs: Optional[int] = None             # Override TRAIN_PARAMS['epochs'] for this run.
+                                              # None -> backbone default. Useful for quick
+                                              # smoke tests (epochs=1) without editing source.
+    smoke_test: bool = False                 # Run just 2 batches per split to verify shapes,
+                                              # then exit. Implies epochs=1. No result saved.
+    grad_checkpointing: bool = True          # SAN only, full_graph=True only (see
+                                              # san_backend.enable_gradient_checkpointing).
+                                              # Set False if you have a bigger card and want
+                                              # the ~30-50% speed back.
+    use_amp: bool = False                    # SAN only, CUDA only (see san_backend.
+                                              # san_train's use_amp). OFF by default:
+                                              # this SAN env's pinned DGL ships a compiled
+                                              # CUDA SpMM kernel with no fp16 support at
+                                              # all (confirmed: DGLError "Data type not
+                                              # recognized with bits 16" from a real
+                                              # training crash). Only enable if you've
+                                              # confirmed your DGL build supports it.
     deterministic: bool = True
     notes: str = ""
 

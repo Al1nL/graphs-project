@@ -295,6 +295,47 @@ def main():
                              "scripts/calibrate_target_nodes.py")
     parser.add_argument("--num-probe-graphs", type=int, default=None,
                         help=f"default {PROBE_N_GRAPHS} (config.PROBE_N_GRAPHS)")
+    parser.add_argument("--batch-size", type=int, default=None,
+                        help="override the backbone's own per-dataset default (e.g. "
+                             "san_backend.BASE_NET_PARAMS); useful for probing a card's "
+                             "OOM ceiling without editing source. Not persisted anywhere "
+                             "but this run's own config_hash/provenance.")
+    parser.add_argument("--edge-budget", type=int, default=None,
+                        help="SAN full_graph=True only: override the per-batch edge-count "
+                             "cap (see san_backend.EdgeBudgetBatchSampler). Pass 0 to "
+                             "disable edge-budget batching and fall back to fixed "
+                             "--batch-size.")
+    parser.add_argument("--max-nodes", type=int, default=None,
+                        help="SAN full_graph=True only: exclude graphs with more nodes "
+                             "than this from every split (a disclosed compromise -- "
+                             "logs excluded count/fraction). Pass 0 to explicitly "
+                             "disable filtering.")
+    parser.add_argument("--accumulation-steps", type=int, default=None,
+                        help="SAN only: accumulate gradients over this many physical "
+                             "mini-batches per optimizer step, to recover a larger "
+                             "EFFECTIVE batch's training statistics without raising peak "
+                             "memory. Does not affect --batch-size/--edge-budget.")
+    parser.add_argument("--no-grad-checkpointing", action="store_true",
+                        help="disable SAN's gradient checkpointing on full_graph=True "
+                             "datasets (on by default there -- see "
+                             "san_backend.enable_gradient_checkpointing). Only meaningful "
+                             "for --backbone san.")
+    parser.add_argument("--amp", action="store_true",
+                        help="enable SAN's mixed-precision (AMP) training. OFF by "
+                             "default: this SAN env's pinned DGL has no fp16-capable "
+                             "compiled CUDA kernel (confirmed: DGLError 'Data type not "
+                             "recognized with bits 16' from a real training crash -- see "
+                             "san_backend.py's use_amp comment). Only enable if you've "
+                             "confirmed your DGL build supports it. Only meaningful for "
+                             "--backbone san.")
+    parser.add_argument("--epochs", type=int, default=None,
+                        help="override TRAIN_PARAMS['epochs'] for this run only. "
+                             "Useful for quick smoke tests (--epochs 1) without editing "
+                             "source. None means use the backend's own default.")
+    parser.add_argument("--smoke-test", action="store_true",
+                        help="run just 2 batches of train+val+test to verify shapes, "
+                             "then exit without saving results. CPU-only friendly. "
+                             "Implies --epochs 1.")
     parser.add_argument("--dry-run", action="store_true",
                         help="print the resolved adapter config and exit; train nothing")
     args = parser.parse_args()
@@ -320,6 +361,11 @@ def main():
         backbone=args.backbone, pe=args.pe, dataset=args.dataset, seed=args.seed,
         cache_dir=args.cache_dir, results_dir=args.results_dir,
         num_target_nodes=args.num_target_nodes, num_probe_graphs=args.num_probe_graphs,
+        batch_size=args.batch_size, grad_checkpointing=not args.no_grad_checkpointing,
+        edge_budget=args.edge_budget, use_amp=args.amp,
+        max_nodes=args.max_nodes, accumulation_steps=args.accumulation_steps,
+        epochs=args.epochs,
+        smoke_test=args.smoke_test,
     )
     run_cell(run_cfg)
 
