@@ -5,27 +5,28 @@
 #SBATCH --gpus=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16000
-#SBATCH --output=job_%j.out
-#SBATCH --error=job_%j.err
+#SBATCH --output=logs/job_%j.out
+#SBATCH --error=logs/job_%j.err
 
-# Redirect DGL config/cache away from quota-restricted home directory
+PE="${1:-rwse}"
+
+mkdir -p logs
+
 export DGLBACKEND=pytorch
-export DGL_HOME=/home/yandex/MLWG2026/alinl/tmp/.dgl
-mkdir -p /home/yandex/MLWG2026/alinl/tmp/.dgl
+export DGL_HOME=/home/yandex/MLWG2026/liorpernik/tmp/.dgl
+mkdir -p /home/yandex/MLWG2026/liorpernik/tmp/.dgl
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export PYTHONPATH=/home/yandex/MLWG2026/alinl/SAN:/home/yandex/MLWG2026/liorpernik/graphs-project:$PYTHONPATH
 
-# Add SAN repository and project root to Python import path
-export PYTHONPATH=/home/yandex/MLWG2026/alinl/SAN:/home/yandex/MLWG2026/alinl/graphs-project:$PYTHONPATH
+cd /home/yandex/MLWG2026/liorpernik/graphs-project
 
-# Navigate to project directory
-cd /home/yandex/MLWG2026/alinl/graphs-project
-# Activate environment
-source /home/yandex/MLWG2026/alinl/anaconda3/etc/profile.d/conda.sh
-conda activate san_env
-
-# Dynamically add all NVIDIA CUDA pip library subdirectories to LD_LIBRARY_PATH
 ENV_DIR=/home/yandex/MLWG2026/alinl/anaconda3/envs/san_env
-NVIDIA_LIBS=$(find $ENV_DIR/lib/python3.8/site-packages/nvidia -name lib -type d 2>/dev/null | tr '\n' ':')
-export LD_LIBRARY_PATH=$NVIDIA_LIBS$ENV_DIR/lib:/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+PYTHON=$ENV_DIR/bin/python
 
-# Run smoke test
-python src/run_experiment.py --backbone san --pe rwse --dataset peptides-func --seed 0 --num-target-nodes 300
+NVIDIA_LIBS=$(find $ENV_DIR/lib/python3.8/site-packages/nvidia -name lib -type d 2>/dev/null | tr '\n' ':')
+PYLIBS_DIR=/home/yandex/MLWG2026/liorpernik/pylibs
+PYLIBS_NVIDIA=$(find $PYLIBS_DIR/nvidia -name lib -type d 2>/dev/null | tr '\n' ':')
+export LD_LIBRARY_PATH=$NVIDIA_LIBS$PYLIBS_NVIDIA$ENV_DIR/lib:/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+
+echo "[run_job] PE=$PE"
+$PYTHON src/run_experiment.py --backbone san --pe $PE --dataset peptides-func --seed 0 --num-target-nodes 300
