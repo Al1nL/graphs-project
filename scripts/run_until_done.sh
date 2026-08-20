@@ -2,10 +2,11 @@
 set -uo pipefail
 
 PE="${1:-rwse}"
-RESULT_PATH="results/san_${PE}_peptides-func_seed0.json"
+DATASET="${2:-peptides-func}"
+RESULT_PATH="results/san_${PE}_${DATASET}_seed0.json"
 MAX_RESUBMITS=50
 
-echo "[run_until_done] PE=$PE | watching for $RESULT_PATH"
+echo "[run_until_done] PE=$PE DATASET=$DATASET | watching for $RESULT_PATH"
 
 if [ -f "$RESULT_PATH" ]; then
     echo "[run_until_done] already done."
@@ -14,7 +15,7 @@ fi
 
 for i in $(seq 1 "$MAX_RESUBMITS"); do
     echo "[run_until_done] attempt $i/$MAX_RESUBMITS..."
-    sbatch --wait run_job.sh "$PE"
+    sbatch --wait run_job.sh "$PE" "$DATASET"
     sleep 5
     if [ -f "$RESULT_PATH" ]; then
         echo "[run_until_done] done after $i attempt(s)."
