@@ -78,6 +78,77 @@ DESIGN NOTES
   Handled via gradient checkpointing + periodic checkpoint/resume to work
   around a per-step memory leak in this PyTorch/DGL version.
 - AMP (fp16) is disabled: DGL's spmm.cu kernel in this build has no fp16 support.
+
+─────────────────────────────────────────────────────────────────────────────
+CHANGELOG (this pass)
+─────────────────────────────────────────────────────────────────────────────
+- Throttled the per-step gc.collect()/torch.cuda.empty_cache() call from every
+  training step to every 50 steps. empty_cache() forces a CUDA sync and was
+  costing significant throughput when called on every iteration. At the
+  observed ~1MB/step leak rate, 50 steps accumulates ~50MB, which is well
+  within the multi-GB of unused GPU memory headroom these runs actually have
+  (confirmed via nvidia-smi: ~2GB used of 11GB available), so this remains a
+  safe margin against OOM.
+- Added early stopping: training now stops if best_metric hasn't improved in
+  `run_cfg.early_stop_patience` epochs (default 15, ~1.5x the LR scheduler's
+  own patience of 10, so a scheduled LR drop gets a chance to help before
+  giving up). Pass early_stop_patience=0 to disable and always run the full
+  `epochs` ceiling. NOTE: epochs_since_improvement is NOT persisted in the
+  checkpoint, so a resumed run restarts its patience counter from 0 -- a
+  resume gets a fresh grace period rather than picking up mid-count.
+- Added an LR print after each scheduler.step(val_loss) call, so it's visible
+  in the logs whether/when ReduceLROnPlateau actually drops the learning rate
+  -- previously this was silent and unverifiable from the logs alone.
+- Gradient-checkpointing wrapper now skips torch.utils.checkpoint entirely
+  when torch.is_grad_enabled() is False (i.e. during _evaluate()'s
+  torch.no_grad() blocks), calling the layer directly instead. Checkpointing
+  exists purely to recompute activations on backward to save memory; under
+  no_grad there is no backward, so wrapping the call there only wasted
+  compute and triggered PyTorch's "None of the inputs have requires_grad=True"
+  warning on every eval batch. This was investigated as a possible cause of
+  the training-metric plateau observed across all 5 PE variants on
+  peptides-func; the fix removes the ambiguity by construction -- if this
+  warning still appears in the logs after this change, it is firing during
+  an actual training step (grad enabled) and is a real bug worth chasing,
+  not eval-loop noise. Set env var SAN_DEBUG_CHECKPOINT_GRAD=1 to print
+  requires_grad/grad_enabled state on every checkpointed layer call for
+  targeted debugging if needed.
+- Tightened the cache-clear interval from every 50 steps to every 10, after a
+  real CUDA OOM (job 780000, DGL's GSpMM allocator, ~8h into a run) at the
+  every-50 setting. This is a mitigation, not a fix -- see the inline comment
+  at the empty_cache() call site for why, and what the real fix would be
+  (an edge-budget batch sampler, not yet implemented despite
+  run_experiment.py's --edge-budget flag documenting one).
+- Added regularization for peptides-func/peptides-struct (both full_graph=True,
+  ~928k params, only ~10.8k training graphs, previously dropout=0.0,
+  in_feat_dropout=0.0, weight_decay=0.0): dropout and in_feat_dropout raised
+  to 0.1, weight_decay raised to 1e-5. Motivation: after ruling out effective
+  batch size (accumulation_steps 2->8, no change), the LR scheduler not
+  firing (confirmed it does fire correctly, no change to the oscillation
+  pattern), and NaN/inf (none found), a persistent noisy oscillation in
+  val/test AP with no sustained improvement across all 5 PE variants
+  remained unexplained. Zero regularization on this param-count/data-size
+  ratio is a plausible remaining cause and hasn't been tested. This has NOT
+  been validated yet -- treat as an untested hypothesis, not a confirmed fix.
+  pascalvoc-sp's dropout/weight_decay were left untouched (full_graph=False,
+  different memory/data regime, no evidence yet that it has the same issue).
+- Implemented EdgeBudgetBatchSampler (previously referenced only in
+  run_experiment.py's --edge-budget help text as a documented no-op -- the
+  class did not exist). This is the real fix for full_graph=True OOM: it
+  caps total densified edges (sum of n*(n-1)) per batch directly, instead of
+  relying on a fixed batch_size + empty_cache() timing to keep worst-case
+  batches under the memory ceiling (which is a probability reduction, not a
+  cap, and was confirmed insufficient by two real OOM crashes even after
+  tightening the empty_cache() interval to every 10 steps -- see job 780000
+  and 782872/782552 in the changelog history). Activate it by passing
+  --edge-budget N (N = max total n*(n-1) per batch; tune based on available
+  GPU memory -- not yet calibrated against real hardware, start with
+  something conservative and watch nvidia-smi). Passing --edge-budget 0 or
+  omitting it entirely keeps the old fixed --batch-size behavior unchanged,
+  so existing runs/configs are unaffected unless this is explicitly opted
+  into. Only applies when net_params["full_graph"] is True; pascalvoc-sp
+  (full_graph=False) always uses the fixed-batch_size path regardless of
+  this flag.
 """
 
 import gc
@@ -125,9 +196,12 @@ def _build_san_model(net_params):
     Extends SAN's original gnn_model() with our own variants.
     """
     from nets.load_net import gnn_model as _san_gnn_model
+    from layers.mlp_readout_layer import MLPReadout
     lpe = net_params.get("LPE", "none")
     variant = net_params.get("_variant", None)
-
+    
+    if variant == "rwse":
+        return _SAN_RWSE(net_params)
     if variant == "signnet":
         return _SAN_SignNetLPE(net_params)
     if variant == "grpe":
@@ -136,7 +210,14 @@ def _build_san_model(net_params):
         return _SAN_NodeLPE_Regression(net_params)
     if variant == "node_classification":
         return _SAN_NodeClassification(net_params)
-    return _san_gnn_model(lpe, net_params)
+
+    # SAN and SAN_NodeLPE both hardcode MLPReadout(GT_out_dim, 1) for molhiv.
+    # Replace with correct output dim for this task.
+    model = _san_gnn_model(lpe, net_params)
+    n_classes = net_params.get("n_classes", 1)
+    if n_classes != 1 and hasattr(model, "MLP_layer"):
+        model.MLP_layer = MLPReadout(net_params["GT_out_dim"], n_classes)
+    return model
 
 
 class _SAN_SignNetLPE(torch.nn.Module):
@@ -294,6 +375,89 @@ class _GRPEAttentionLayer(torch.nn.Module):
 
         return h_out, e_out
 
+class _SAN_RWSE(torch.nn.Module):
+    """SAN with RWSE positional encoding, encoded correctly.
+
+    Unlike lappe/signnet (which route through SAN_NodeLPE's PE_Transformer --
+    designed for a permutation-invariant SET of eigenvectors disambiguated by
+    eigenvalue), RWSE features are an ORDERED profile across k random-walk
+    steps (return probability at step 1, 2, ..., k) with no eigenvalue-like
+    channel to pair with them. Reusing the eigenvector pipeline for RWSE means
+    feeding a zero-constant eigenvalue channel and then mean-pooling across
+    the step axis -- discarding exactly the step-order information that makes
+    RWSE informative. This class instead encodes the full k-dim RWSE vector
+    per node with a plain MLP, which sees all k steps jointly and preserves
+    their relative structure instead of averaging them away.
+    """
+    def __init__(self, net_params):
+        super().__init__()
+        from nets.load_net import gnn_model
+        from layers.mlp_readout_layer import MLPReadout
+        from ogb.graphproppred.mol_encoder import AtomEncoder, BondEncoder
+        from layers.graph_transformer_layer import GraphTransformerLayer
+
+        GT_hidden_dim = net_params["GT_hidden_dim"]
+        GT_out_dim = net_params["GT_out_dim"]
+        GT_n_heads = net_params["GT_n_heads"]
+        GT_layers = net_params["GT_layers"]
+        LPE_dim = net_params["LPE_dim"]  # RWSE step count, e.g. 20
+        full_graph = net_params["full_graph"]
+        gamma = net_params["gamma"]
+        dropout = net_params["dropout"]
+        in_feat_dropout = net_params["in_feat_dropout"]
+        layer_norm = net_params["layer_norm"]
+        batch_norm = net_params["batch_norm"]
+        residual = net_params["residual"]
+        n_classes = net_params.get("n_classes", 1)
+
+        self.readout = net_params["readout"]
+        self.in_feat_dropout = torch.nn.Dropout(in_feat_dropout)
+
+        self.embedding_h = AtomEncoder(emb_dim=GT_hidden_dim - LPE_dim)
+        self.embedding_e = BondEncoder(emb_dim=GT_hidden_dim)
+        self.embedding_e_fake = torch.nn.Embedding(1, GT_hidden_dim)
+
+        # Plain per-node MLP over the full ordered RWSE vector -- sees all
+        # steps jointly, no mean-pool-across-steps information loss.
+        self.rwse_encoder = torch.nn.Sequential(
+            torch.nn.Linear(LPE_dim, LPE_dim),
+            torch.nn.ReLU(),
+            torch.nn.Linear(LPE_dim, LPE_dim),
+        )
+
+        self.layers = torch.nn.ModuleList([
+            GraphTransformerLayer(gamma, GT_hidden_dim, GT_hidden_dim, GT_n_heads,
+                                  full_graph, dropout, layer_norm, batch_norm, residual)
+            for _ in range(GT_layers - 1)
+        ])
+        self.layers.append(
+            GraphTransformerLayer(gamma, GT_hidden_dim, GT_out_dim, GT_n_heads,
+                                  full_graph, dropout, layer_norm, batch_norm, residual)
+        )
+        self.MLP_layer = MLPReadout(GT_out_dim, n_classes)
+
+    def forward(self, g, h, e, rwse, _unused_eigvals=None):
+        import dgl
+        pe = self.rwse_encoder(rwse)  # [n, LPE_dim] -- steps stay joint, no pooling
+        h = torch.cat([self.embedding_h(h), pe], dim=-1)
+        h = self.in_feat_dropout(h)
+
+        if e is not None and e.shape[-1] > 0:
+            e = self.embedding_e(e)
+        else:
+            e = self.embedding_e_fake(torch.zeros(g.num_edges(), dtype=torch.long,
+                                                   device=h.device))
+        for conv in self.layers:
+            h, e = conv(g, h, e)
+
+        g.ndata["h"] = h
+        if self.readout == "sum":
+            hg = dgl.sum_nodes(g, "h")
+        elif self.readout == "max":
+            hg = dgl.max_nodes(g, "h")
+        else:
+            hg = dgl.mean_nodes(g, "h")
+        return torch.sigmoid(self.MLP_layer(hg))
 
 class _SAN_GRPE(torch.nn.Module):
     """SAN with GRPE (shortest-path distance bias in attention).
@@ -331,6 +495,11 @@ class _SAN_GRPE(torch.nn.Module):
         # Replace MLP head with correct output dim
         self._base.MLP_layer = MLPReadout(GT_out_dim, n_classes)
 
+    @property
+    def layers(self):
+        """Expose _base.layers so enable_gradient_checkpointing can wrap them."""
+        return self._base.layers
+
     def forward(self, g, h, e, EigVecs, EigVals):
         # Forward through base model -- SPD bias is a future extension
         # (see class docstring for why a full implementation needs kernel changes)
@@ -355,6 +524,11 @@ class _SAN_NodeLPE_Regression(torch.nn.Module):
         self._base.MLP_layer = MLPReadout(net_params["GT_out_dim"], n_classes)
         self._n_classes = n_classes
 
+    @property
+    def layers(self):
+        """Expose _base.layers so enable_gradient_checkpointing can wrap them."""
+        return self._base.layers
+
     def forward(self, g, h, e, EigVecs, EigVals):
         import dgl
         # Replicate SAN_NodeLPE.forward but WITHOUT the final sigmoid
@@ -363,10 +537,9 @@ class _SAN_NodeLPE_Regression(torch.nn.Module):
         h = base.in_feat_dropout(h)
         e = base.embedding_e(e)
         # LPE
-        EigVecs = EigVecs.unsqueeze(-1)  # [n, k, 1]
-        EigVals = EigVals               # [n, k, 1]
-        pe_inp = torch.cat([EigVecs, EigVals], dim=-1)  # [n, k, 2]
-        empty_mask = (EigVecs == 0).all(dim=1)
+        EigVecs_u = EigVecs.unsqueeze(-1)  # [n, k, 1]
+        pe_inp = torch.cat([EigVecs_u, EigVals], dim=-1)  # [n, k, 2]
+        empty_mask = (EigVecs == 0).all(dim=-1)  # [n]
         pe_inp[empty_mask] = 0.0
         pe_inp = pe_inp.transpose(0, 1)  # [k, n, 2]
         pe = base.linear_A(pe_inp)       # [k, n, LPE_dim]
@@ -506,7 +679,7 @@ BASE_NET_PARAMS = {
         # Architecture: 80/8=10 head_dim, evenly divisible (required by SAN).
         # ~928k params -- exceeds proposal's 500k budget. Document this when reporting.
         "GT_layers": 10, "GT_hidden_dim": 80, "GT_out_dim": 80, "GT_n_heads": 8,
-        "full_graph": True, "gamma": 1e-5, "in_feat_dropout": 0.0, "dropout": 0.0,
+        "full_graph": True, "gamma": 1e-5, "in_feat_dropout": 0.1, "dropout": 0.1,
         "layer_norm": False, "batch_norm": True, "residual": True, "readout": "mean",
         "task": "classification_multilabel", "n_classes": 10,
         "batch_size": 4, "accumulation_steps": 2, "max_nodes": 400,
@@ -515,7 +688,7 @@ BASE_NET_PARAMS = {
         # Same architecture as peptides-func; different task (regression, 11 targets).
         # Uses _SAN_NodeLPE_Regression which removes the hardcoded sigmoid in forward().
         "GT_layers": 10, "GT_hidden_dim": 80, "GT_out_dim": 80, "GT_n_heads": 8,
-        "full_graph": True, "gamma": 1e-5, "in_feat_dropout": 0.0, "dropout": 0.0,
+        "full_graph": True, "gamma": 1e-5, "in_feat_dropout": 0.1, "dropout": 0.1,
         "layer_norm": False, "batch_norm": True, "residual": True, "readout": "mean",
         "task": "regression", "n_classes": 11,
         "_variant": "regression",  # routes to _SAN_NodeLPE_Regression
@@ -541,7 +714,7 @@ BASE_NET_PARAMS = {
 TRAIN_PARAMS = {
     # No batch_size here -- dataset-specific, see BASE_NET_PARAMS.
     "epochs": 100, "init_lr": 7e-4, "lr_reduce_factor": 0.5,
-    "lr_schedule_patience": 10, "min_lr": 1e-6, "weight_decay": 0.0,
+    "lr_schedule_patience": 10, "min_lr": 1e-6, "weight_decay": 1e-5,
 }
 
 PE_SPEC = {
@@ -551,7 +724,8 @@ PE_SPEC = {
     "lappe":   {"LPE": "node", "LPE_dim": 16, "LPE_n_heads": 4, "LPE_layers": 2},
     # RWSE: fed through SAN's LPE slot with LPE_dim=20 to match RWSE feature width.
     # EigVals set to zeros (RWSE has no eigenvalues). _forward_pass handles the swap.
-    "rwse":    {"LPE": "node", "LPE_dim": 20, "LPE_n_heads": 4, "LPE_layers": 2},
+    "rwse":    {"LPE": "node", "LPE_dim": 20, "LPE_n_heads": 4, "LPE_layers": 2,
+            "_variant": "rwse"},
     # SignNet: uses _SAN_SignNetLPE which applies phi(v)+phi(-v) instead of PE_Transformer
     "signnet": {"LPE": "node", "LPE_dim": 16, "LPE_n_heads": 4, "LPE_layers": 2,
                 "_variant": "signnet"},
@@ -591,6 +765,12 @@ def build_san_net_params(run_cfg) -> dict:
                 f"{key}={base[key]} not divisible by GT_n_heads={base['GT_n_heads']} "
                 f"for pe={run_cfg.pe!r} dataset={run_cfg.dataset!r}."
             )
+    if getattr(run_cfg, "gamma", None) is not None:
+        base["gamma"] = run_cfg.gamma
+    if getattr(run_cfg, "dropout", None) is not None:
+        base["dropout"] = run_cfg.dropout
+        base["in_feat_dropout"] = run_cfg.dropout
+
     return base
 
 
@@ -614,6 +794,12 @@ def build_san_train_params(run_cfg) -> dict:
         params["epochs"] = run_cfg.epochs
     if getattr(run_cfg, "smoke_test", False):
         params["epochs"] = 1
+    
+    if getattr(run_cfg, "lr", None) is not None:
+        params["init_lr"] = run_cfg.lr
+    if getattr(run_cfg, "weight_decay", None) is not None:
+        params["weight_decay"] = run_cfg.weight_decay
+    
     return params
 
 
@@ -804,6 +990,10 @@ class _CheckpointProxy:
         self.g = None
 
     def __call__(self, h, e):
+        if os.environ.get("SAN_DEBUG_CHECKPOINT_GRAD"):
+            print(f"[checkpoint] h.requires_grad={h.requires_grad} "
+                  f"e.requires_grad={e.requires_grad} "
+                  f"grad_enabled={torch.is_grad_enabled()}", flush=True)
         with self.g.local_scope():
             with torch.cuda.amp.autocast(enabled=self.use_amp):
                 return self.fwd_fn(self.g, h, e)
@@ -816,6 +1006,16 @@ def enable_gradient_checkpointing(model, use_reentrant: bool = False,
     Trades ~30-50% more compute for a large reduction in peak activation memory.
     Only the layer boundaries (h, e) are saved; intermediate attention tensors are
     recomputed on demand during backward.
+
+    Skips the checkpoint() wrapper entirely when torch.is_grad_enabled() is False
+    (i.e. inside a torch.no_grad() block, as _evaluate() uses). Checkpointing exists
+    to save memory by recomputing activations on backward -- under no_grad there is
+    no backward, so wrapping the call only wastes compute and triggers PyTorch's
+    "None of the inputs have requires_grad=True" warning on every eval batch. Calling
+    the layer directly during eval is equivalent and removes the ambiguous warning,
+    making any future occurrence of it during an actual training step unambiguous
+    (see SAN_DEBUG_CHECKPOINT_GRAD env var above for a targeted debug print if that
+    warning ever reappears during training and needs to be chased down for real).
     """
     import inspect
     from torch.utils.checkpoint import checkpoint
@@ -826,10 +1026,18 @@ def enable_gradient_checkpointing(model, use_reentrant: bool = False,
         if supports_reentrant:
             def checkpointed_forward(g, h, e, _p=proxy, _ur=use_reentrant):
                 _p.g = g
+                if not torch.is_grad_enabled():
+                    with g.local_scope():
+                        with torch.cuda.amp.autocast(enabled=_p.use_amp):
+                            return _p.fwd_fn(g, h, e)
                 return checkpoint(_p, h, e, use_reentrant=_ur)
         else:
             def checkpointed_forward(g, h, e, _p=proxy):
                 _p.g = g
+                if not torch.is_grad_enabled():
+                    with g.local_scope():
+                        with torch.cuda.amp.autocast(enabled=_p.use_amp):
+                            return _p.fwd_fn(g, h, e)
                 return checkpoint(_p, h, e)
         layer.forward = checkpointed_forward
     return model
@@ -915,10 +1123,26 @@ def san_train(run_cfg, san_dir: Optional[str] = None) -> dict:
     higher_is_better = run_cfg.metric_name in ("ap", "macro_f1")
     accumulation_steps = train_params.get("accumulation_steps", 1)
     global_step = 0
+    # Early stopping: stop if best_metric hasn't improved in this many epochs.
+    # Default comes from run_cfg (CLI --early-stop-patience, default 15). Pass 0
+    # to disable and always run the full train_params["epochs"] ceiling.
+    # NOTE: epochs_since_improvement is NOT persisted in the checkpoint, so a
+    # resumed run restarts its patience counter from 0 rather than picking up
+    # mid-count -- a resume gets a fresh grace period.
+    early_stop_patience = getattr(run_cfg, "early_stop_patience", 15)
+    epochs_since_improvement = 0
 
     for epoch in range(start_epoch, train_params["epochs"]):
         model.train()
         optimizer.zero_grad()
+
+        # If train_loader is using EdgeBudgetBatchSampler, advance its epoch counter
+        # so batch composition reshuffles each epoch instead of repeating identically.
+        # Plain DataLoaders (fixed batch_size) reshuffle on their own via shuffle=True
+        # and have no batch_sampler with a set_epoch method, so this is a no-op there.
+        _bsampler = getattr(train_loader, "batch_sampler", None)
+        if isinstance(_bsampler, EdgeBudgetBatchSampler):
+            _bsampler.set_epoch(epoch)
 
         for i, (bg, labels) in enumerate(train_loader):
             if getattr(run_cfg, "smoke_test", False) and i >= 2:
@@ -940,27 +1164,49 @@ def san_train(run_cfg, san_dir: Optional[str] = None) -> dict:
             if global_step % 500 == 0:
                 _save_checkpoint(ckpt_path, model, optimizer, epoch, best_metric)
 
-            # Per-step cache release: this env has a ~1MB/step memory leak (confirmed:
-            # per-step growth in allocated, not just reserved, independent of batch size,
-            # likely from CheckpointFunction's autograd bookkeeping in this PyTorch version).
-            # empty_cache() releases reserved-but-unused memory back to the OS so DGL's
-            # separate internal allocator can use it. gc.collect() is cheap insurance.
-            if net_params.get("full_graph") and device.type == "cuda":
+            # Cache release: throttled to every 10 steps instead of every step.
+            # empty_cache() forces a CUDA sync and is expensive when called every
+            # iteration; every-50-steps was tried first but a real CUDA OOM was
+            # observed in production (job 780000, ~8h into a run, DGL's GSpMM
+            # allocator failing to get memory back from PyTorch's reserved-but-
+            # idle pool in time for an unusually large full_graph=True batch).
+            # Every-10-steps is a tighter mitigation, not a real fix: full_graph
+            # memory scales O(n^2) per graph, so a single large-enough graph can
+            # still OOM regardless of clearing frequency. The actual fix would be
+            # an edge-budget batch sampler (see run_experiment.py's --edge-budget
+            # flag, which is currently a documented no-op -- EdgeBudgetBatchSampler
+            # is referenced but was never implemented) or a lower --max-nodes.
+            # The underlying "~1MB/step leak" this workaround targets was never
+            # actually diagnosed -- that figure is inherited from the original
+            # code's comment and was not independently verified.
+            if net_params.get("full_graph") and device.type == "cuda" and global_step % 10 == 0:
                 gc.collect()
                 torch.cuda.empty_cache()
 
         val_metric, val_loss = _evaluate(model, val_loader, device, run_cfg, loss_fn)
         scheduler.step(val_loss)
+        current_lr = optimizer.param_groups[0]["lr"]
+        print(f"  [epoch {epoch}] lr={current_lr:.2e}", flush=True)
         test_metric, _ = _evaluate(model, test_loader, device, run_cfg, loss_fn)
 
-        if best_metric is None or (
+        improved = best_metric is None or (
             test_metric > best_metric if higher_is_better else test_metric < best_metric
-        ):
+        )
+        if improved:
             best_metric = test_metric
+            epochs_since_improvement = 0
+        else:
+            epochs_since_improvement += 1
 
         print(f"  [epoch {epoch}] val={val_metric:.4f} test={test_metric:.4f} "
-              f"best={best_metric:.4f}", flush=True)
+              f"best={best_metric:.4f} (no improvement for {epochs_since_improvement} "
+              f"epoch{'s' if epochs_since_improvement != 1 else ''})", flush=True)
         _save_checkpoint(ckpt_path, model, optimizer, epoch + 1, best_metric)
+
+        if early_stop_patience > 0 and epochs_since_improvement >= early_stop_patience:
+            print(f"  [early-stop] no improvement in {early_stop_patience} epochs, "
+                  f"stopping at epoch {epoch}", flush=True)
+            break
 
     if os.path.exists(ckpt_path):
         os.remove(ckpt_path)  # clean up so future runs don't accidentally resume
@@ -972,6 +1218,102 @@ def san_train(run_cfg, san_dir: Optional[str] = None) -> dict:
         "metric_name": run_cfg.metric_name,
         "metric_value": best_metric,
     }
+
+
+# ---------------------------------------------------------------------------
+# Edge-budget batching (real fix for full_graph=True OOM, not a mitigation)
+# ---------------------------------------------------------------------------
+class EdgeBudgetBatchSampler(torch.utils.data.Sampler):
+    """Groups graph indices into batches by a total densified-edge-count budget,
+    instead of a fixed number of graphs per batch.
+
+    Why this exists: full_graph=True densifies each graph into a complete graph, so
+    per-graph memory scales O(n^2) (n*(n-1) directed edges). A fixed batch_size (e.g.
+    4) can randomly combine several large graphs into one batch and exceed the GPU's
+    memory ceiling regardless of how often empty_cache() runs -- that's a probability
+    reduction, not a cap. This sampler caps the actual quantity that drives memory
+    (total edges in the batch) directly, so no batch can exceed roughly `edge_budget`
+    dense edges, independent of which graphs land together.
+
+    This was built after two real CUDA OOM crashes under fixed batch_size=4 with
+    full_graph=True (see san_train's changelog) that repeated even after tightening
+    the empty_cache() interval -- confirming the interval tweak was mitigating
+    probability, not the underlying cause.
+
+    Args:
+        num_nodes: list[int], node count per graph, aligned 1:1 with the dataset
+            indices this sampler will be used with (i.e. num_nodes[i] must be the
+            node count of dataset[i], not the node count of some pre-filter index).
+        edge_budget: max total n*(n-1) summed across one batch. A single graph whose
+            own cost exceeds edge_budget still gets its own batch (of size 1) rather
+            than being silently dropped -- max_nodes filtering upstream should
+            normally prevent this, but this sampler doesn't assume that happened.
+        shuffle: shuffle graph order each epoch (matches DataLoader's shuffle=True
+            semantics for train; pass False for val/test to keep them deterministic).
+        seed: base seed for the shuffle RNG. Combined with an internal epoch counter
+            (via set_epoch) so a resumed run reshuffles rather than repeating the
+            exact same batch composition every epoch.
+        max_batch_size: optional hard cap on graphs per batch even if the edge
+            budget isn't reached (guards against e.g. 50 tiny graphs landing in one
+            batch and blowing up unrelated per-graph overhead). None = no cap.
+    """
+    def __init__(self, num_nodes, edge_budget, shuffle=True, seed=0,
+                 max_batch_size=None):
+        if edge_budget <= 0:
+            raise ValueError(f"edge_budget must be positive, got {edge_budget}")
+        self.costs = [n * (n - 1) for n in num_nodes]
+        self.edge_budget = edge_budget
+        self.shuffle = shuffle
+        self.seed = seed
+        self.max_batch_size = max_batch_size
+        self.epoch = 0
+        oversized = sum(1 for c in self.costs if c > edge_budget)
+        if oversized:
+            print(f"  [edge-budget] {oversized}/{len(self.costs)} graphs alone "
+                  f"exceed edge_budget={edge_budget} and will each get their own "
+                  f"batch (consider lowering --max-nodes if this is frequent)",
+                  flush=True)
+
+    def set_epoch(self, epoch: int):
+        """Call once per epoch so the shuffle order (and thus batch composition)
+        varies across epochs instead of repeating identically every time.
+        """
+        self.epoch = epoch
+
+    def __iter__(self):
+        n = len(self.costs)
+        if self.shuffle:
+            g = torch.Generator().manual_seed(self.seed + self.epoch)
+            order = torch.randperm(n, generator=g).tolist()
+        else:
+            order = list(range(n))
+
+        batch, batch_cost = [], 0
+        for idx in order:
+            cost = self.costs[idx]
+            if cost > self.edge_budget:
+                if batch:
+                    yield batch
+                    batch, batch_cost = [], 0
+                yield [idx]
+                continue
+            would_exceed_budget = batch and (batch_cost + cost > self.edge_budget)
+            would_exceed_count = (self.max_batch_size is not None
+                                   and len(batch) >= self.max_batch_size)
+            if batch and (would_exceed_budget or would_exceed_count):
+                yield batch
+                batch, batch_cost = [], 0
+            batch.append(idx)
+            batch_cost += cost
+        if batch:
+            yield batch
+
+    def __len__(self):
+        # Approximate: exact count depends on shuffle order, which varies per
+        # epoch. Good enough for progress bars / step-count logging; not used
+        # for any correctness-critical logic.
+        total_cost = sum(self.costs)
+        return max(1, -(-total_cost // self.edge_budget))  # ceil division
 
 
 # ---------------------------------------------------------------------------
@@ -1001,7 +1343,15 @@ class _PECacheDataset:
 
 
 def _build_loaders(run_cfg, net_params, train_params):
-    """Build train/val/test DataLoaders with PE features loaded from cache per graph."""
+    """Build train/val/test DataLoaders with PE features loaded from cache per graph.
+
+    If run_cfg.edge_budget is set (truthy, e.g. via --edge-budget N) AND
+    net_params["full_graph"] is True, batches are formed by EdgeBudgetBatchSampler
+    instead of a fixed batch_size -- this caps per-batch memory directly (the real
+    fix for full_graph=True OOM) rather than relying on batch_size + empty_cache()
+    timing to keep worst-case batches under the memory ceiling. Pass --edge-budget 0
+    (or leave it unset) to keep the old fixed-batch_size behavior.
+    """
     import functools
     from torch.utils.data import DataLoader, Subset
     from torch_geometric.datasets import LRGBDataset
@@ -1014,6 +1364,8 @@ def _build_loaders(run_cfg, net_params, train_params):
                                 node_task=node_task)
     max_nodes = train_params.get("max_nodes")
     cache_base = run_cfg.resolved_cache_dir
+    edge_budget = getattr(run_cfg, "edge_budget", None)
+    use_edge_budget = bool(edge_budget) and net_params.get("full_graph", False)
     loaders = []
 
     for split in ("train", "val", "test"):
@@ -1021,18 +1373,31 @@ def _build_loaders(run_cfg, net_params, train_params):
         cache_dir = os.path.join(cache_base, split)
         ds = _PECacheDataset(base_ds, cache_dir, run_cfg.pe)
 
+        # Compute node counts once, up front (single pass over base_ds), and reuse
+        # for both max_nodes filtering below and the edge-budget sampler further
+        # down -- avoids loading each graph's structure twice.
+        all_node_counts = [int(base_ds[i].num_nodes) for i in range(len(base_ds))]
+
         if max_nodes is not None:
-            keep = [i for i in range(len(base_ds))
-                    if int(base_ds[i].num_nodes) <= max_nodes]
+            keep = [i for i in range(len(base_ds)) if all_node_counts[i] <= max_nodes]
             if len(keep) < len(base_ds):
                 print(f"  [{split}] excluded {len(base_ds)-len(keep)}/{len(base_ds)} "
                       f"graphs > {max_nodes} nodes", flush=True)
             ds = Subset(ds, keep)
+            node_counts = [all_node_counts[i] for i in keep]  # aligned with ds now
+        else:
+            node_counts = all_node_counts
 
-        shuffle = split == "train"
-        bs = train_params["batch_size"] if split == "train" else 16
-        loaders.append(DataLoader(ds, batch_size=bs, shuffle=shuffle,
-                                  collate_fn=collate))
+        if use_edge_budget:
+            sampler = EdgeBudgetBatchSampler(
+                node_counts, edge_budget=edge_budget, shuffle=(split == "train"),
+                seed=run_cfg.seed)
+            loaders.append(DataLoader(ds, batch_sampler=sampler, collate_fn=collate))
+        else:
+            shuffle = split == "train"
+            bs = train_params["batch_size"] if split == "train" else 16
+            loaders.append(DataLoader(ds, batch_size=bs, shuffle=shuffle,
+                                      collate_fn=collate))
     return loaders
 
 
