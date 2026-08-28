@@ -328,10 +328,23 @@ def main():
                              "san_backend.py's use_amp comment). Only enable if you've "
                              "confirmed your DGL build supports it. Only meaningful for "
                              "--backbone san.")
+    parser.add_argument("--lr", type=float, default=None,
+                        help="override TRAIN_PARAMS['init_lr']. SAN only.")
+    parser.add_argument("--gamma", type=float, default=None,
+                        help="override net_params['gamma']. SAN only.")
+    parser.add_argument("--dropout", type=float, default=None,
+                        help="override net_params['dropout'] and in_feat_dropout. SAN only.")
+    parser.add_argument("--weight-decay", type=float, default=None,
+                        help="override TRAIN_PARAMS['weight_decay']. SAN only.")
     parser.add_argument("--epochs", type=int, default=None,
                         help="override TRAIN_PARAMS['epochs'] for this run only. "
                              "Useful for quick smoke tests (--epochs 1) without editing "
                              "source. None means use the backend's own default.")
+    parser.add_argument("--early-stop-patience", type=int, default=15,
+                        help="stop training if best_metric hasn't improved in this many "
+                             "epochs. Pass 0 to disable early stopping entirely. Default "
+                             "15 (~1.5x the LR scheduler's own patience of 10, so a LR "
+                             "drop gets a chance to help before giving up).")
     parser.add_argument("--smoke-test", action="store_true",
                         help="run just 2 batches of train+val+test to verify shapes, "
                              "then exit without saving results. CPU-only friendly. "
@@ -362,9 +375,11 @@ def main():
         cache_dir=args.cache_dir, results_dir=args.results_dir,
         num_target_nodes=args.num_target_nodes, num_probe_graphs=args.num_probe_graphs,
         batch_size=args.batch_size, grad_checkpointing=not args.no_grad_checkpointing,
-        edge_budget=args.edge_budget, use_amp=args.amp,
+        edge_budget=args.edge_budget, use_amp=args.amp, lr=args.lr, gamma=args.gamma, dropout=args.dropout,
+        weight_decay=args.weight_decay,
         max_nodes=args.max_nodes, accumulation_steps=args.accumulation_steps,
         epochs=args.epochs,
+        early_stop_patience=args.early_stop_patience,
         smoke_test=args.smoke_test,
     )
     run_cell(run_cfg)

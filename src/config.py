@@ -207,6 +207,11 @@ class RunConfig:
     num_probe_graphs: Optional[int] = None   # None -> config.PROBE_N_GRAPHS
     max_dist: Optional[int] = None           # defaults per dataset from dataset_meta
     epochs: Optional[int] = None             # None -> backbone config's own value
+    early_stop_patience: int = 15
+    lr: Optional[float] = None
+    gamma: Optional[float] = None
+    dropout: Optional[float] = None
+    weight_decay: Optional[float] = None
     batch_size: Optional[int] = None         # None -> backbone's own per-dataset default
                                               # (e.g. san_backend.BASE_NET_PARAMS); set this
                                               # to override without editing source, e.g. when
