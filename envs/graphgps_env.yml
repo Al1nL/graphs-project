@@ -1,8 +1,13 @@
 # Conda environment for the GraphGPS arm of the grid.
 #
 #     conda env create -f envs/graphgps_env.yml
-#     conda activate graphgps
+#     conda activate graphgps_env
 #     cd ../GraphGPS && pip install -e .        # registers the `graphgps` package
+#
+# The env is named graphgps_env, NOT graphgps: scripts/slurm/run_grid.slurm activates
+# `graphgps_env` by that exact name, and envs/san_env.yml already sets the <backbone>_env
+# convention. Upstream's own README uses plain `graphgps`; following it here would make
+# every array task die on `conda activate`.
 #
 # This is GraphGPS's OWN documented recipe (README "Python environment setup with Conda"),
 # read out of the pinned clone at 2801570 rather than reconstructed from memory, with only
@@ -22,7 +27,7 @@
 # before queueing a grid, not after.
 # ---------------------------------------------------------------------------------------
 
-name: graphgps
+name: graphgps_env
 
 channels:
   - pytorch
