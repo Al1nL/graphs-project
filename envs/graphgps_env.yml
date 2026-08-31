@@ -29,7 +29,9 @@ channels:
   - nvidia
   - pyg
   - conda-forge
-  - defaults
+  # `defaults` is deliberately ABSENT. It resolved 16 packages out of Anaconda's own
+  # repo, whose terms require a paid licence for organisations above a headcount a
+  # university clears easily. conda-forge covers every one of them.
 
 dependencies:
   - python=3.10
@@ -40,6 +42,15 @@ dependencies:
   - torchvision
   - torchaudio
   - pytorch-cuda=11.7
+
+  # DO NOT REMOVE, AND DO NOT ASSUME pytorch-cuda ABOVE IS ENOUGH. Without this line the
+  # solve is still SATISFIABLE and still silently WRONG: it pulls `cpuonly` plus
+  # `pytorch-mutex=1.0=cpu` and resolves pytorch to `py3.10_cpu_0` -- CUDA runtime
+  # libraries present, CPU pytorch on top of them -- while torch-scatter/sparse/cluster
+  # still come from the pyg channel as cu117 builds. Verified by dry-run, not guessed.
+  # The failure is nasty because nothing errors: torch.cuda.is_available() returns False
+  # and a grid trains on CPU at a fraction of the speed until someone notices.
+  - pytorch-mutex=1.0=cuda
   - pyg=2.2
 
   # torch-scatter is pulled in by the `pyg` metapackage, but named explicitly because our
@@ -59,7 +70,11 @@ dependencies:
   - pandas
   - pyyaml
   - tqdm
-  - matplotlib
+  # matplotlib-base, not matplotlib: the latter pulls pyqt and the whole Qt stack
+  # (qtbase, qtdeclarative, qtwebchannel, qtsvg, qttools...) for a GUI backend that a
+  # headless compute node cannot use anyway. scripts/aggregate_results.py only ever
+  # writes files, so Agg is sufficient.
+  - matplotlib-base
   - scikit-learn
   - joblib
 
@@ -69,9 +84,16 @@ dependencies:
       - --find-links https://data.pyg.org/whl/torch-1.13.0+cu117.html
       - pyg-lib
 
-      - pytorch-lightning
+      # Upstream's README says `pip install pytorch-lightning torchmetrics` unpinned,
+      # which was correct in 2022 and is a trap now: both went through a major version
+      # that removed APIs the torch-1.13-era code uses. GraphGPS itself never imports
+      # pytorch_lightning -- it is PyG 2.2's own graphgym that does -- so an incompatible
+      # version breaks on `import torch_geometric.graphgym`, a long way from anything
+      # that looks related. Capped below the majors rather than left to resolve.
+      - pytorch-lightning<2.0
+      - torchmetrics<1.0
+
       - yacs
-      - torchmetrics
       - tensorboardX
       - ogb
 
