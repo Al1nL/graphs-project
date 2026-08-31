@@ -206,7 +206,11 @@ class RunConfig:
     num_target_nodes: Optional[int] = None   # calibrate: scripts/calibrate_target_nodes.py
     num_probe_graphs: Optional[int] = None   # None -> config.PROBE_N_GRAPHS
     max_dist: Optional[int] = None           # defaults per dataset from dataset_meta
-    epochs: Optional[int] = None             # None -> backbone config's own value
+    epochs: Optional[int] = None             # Override the backbone's own epoch count for
+                                              # this run (GraphGPS's YAML, SAN's
+                                              # TRAIN_PARAMS). None -> use that default.
+                                              # Useful for quick smoke tests (epochs=1)
+                                              # without editing source.
     early_stop_patience: int = 15
     lr: Optional[float] = None
     gamma: Optional[float] = None
@@ -239,9 +243,6 @@ class RunConfig:
                                               # accumulation_steps for why it's a separate
                                               # axis from batch_size/edge_budget. None ->
                                               # backbone's own default (usually 1, i.e. off).
-    epochs: Optional[int] = None             # Override TRAIN_PARAMS['epochs'] for this run.
-                                              # None -> backbone default. Useful for quick
-                                              # smoke tests (epochs=1) without editing source.
     smoke_test: bool = False                 # Run just 2 batches per split to verify shapes,
                                               # then exit. Implies epochs=1. No result saved.
     grad_checkpointing: bool = True          # SAN only, full_graph=True only (see
