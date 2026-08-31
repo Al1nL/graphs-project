@@ -33,11 +33,20 @@ def test_importing_the_orchestrator_does_not_import_graphgps():
 
 
 def test_make_model_fn_rejects_backbones_that_are_not_wired():
+    """Unwired backbones must refuse, and the refusal must say WHICH one.
+
+    Case-insensitive on purpose: 'san' now dispatches to san_backend.make_san_model_fn,
+    which raises its own message naming the backbone as 'SAN'. That is the right error --
+    it explains that SAN's TRAINING is real and only the probe is missing, which the
+    generic fallback here cannot say -- so the assertion checks the message names the
+    backbone, not that it spells it in the config's lowercase.
+    """
     for backbone in ("san", "graphormer"):
         try:
             run_experiment.make_model_fn(None, backbone, None, None)
         except NotImplementedError as exc:
-            assert backbone in str(exc)
+            assert backbone.lower() in str(exc).lower(), (
+                f"{backbone}'s NotImplementedError does not name it: {exc}")
             continue
         raise AssertionError(f"{backbone} should not claim to be implemented")
 
