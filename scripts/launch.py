@@ -135,7 +135,18 @@ def append_csv(path, row):
 
 
 def run_one(cfg, wandb_run=None, strict_pins=True):
-    from run_experiment import build_config
+    """Run one grid cell end to end and append a CSV row.
+
+    FIX: previously called `TRAIN_FN[cfg.backbone](cfg, ...)` directly and discarded the
+    returned dict entirely -- metric_value, num_params and the sensitivity curve never
+    reached the CSV, and no JSON was written to `cfg.result_path` (see
+    run_experiment.py's module docstring for the full account). This now calls
+    `run_experiment.run_cell(cfg)`, the single function that trains, probes, and writes
+    that JSON, and reads the real numbers back out of what it returns.
+    """
+    from dataset_meta import REL_BINS, REL_RHO_WINDOW, abs_rho_window
+    from run_experiment import run_cell
+    from sensitivity import long_range_fraction, to_relative_curve
 
     seed_everything(cfg.seed, cfg.deterministic)
     prov = cfg.provenance(strict_pins=strict_pins)
@@ -149,10 +160,25 @@ def run_one(cfg, wandb_run=None, strict_pins=True):
     }
     t0 = time.time()
     try:
-        build_config(cfg.backbone, cfg.pe, cfg.dataset, cfg.resolved_cache_dir)
-        from run_experiment import TRAIN_FN
-        TRAIN_FN[cfg.backbone](cfg, cfg.dataset, cfg.seed)
-        row["status"] = "ok"
+        result = run_cell(cfg)
+        row["status"] = result["status"]
+        row["metric_value"] = result.get("metric_value")
+        row["num_params"] = result.get("num_params")
+        row["n_shared_feats"] = result.get("n_shared_feats")
+        curve = result.get("sensitivity_curve")
+        if curve:
+            d_min, d_max = abs_rho_window(cfg.dataset)
+            row["rho"] = long_range_fraction(curve, d_min, d_max)
+            # Relative rho needs per-graph diameters to rebin each curve onto d/diam(G)
+            # BEFORE pooling -- pooling first and rebinning the pooled curve would not be
+            # the same computation, since diameter varies per graph.
+            per_graph = result.get("sensitivity_curves_per_graph") or []
+            rel_curves = [to_relative_curve(g["curve"], g["diameter"], n_bins=REL_BINS)
+                          for g in per_graph if g.get("diameter", 0) > 0]
+            row["rho_rel"] = (
+                long_range_fraction(_pool_rel(rel_curves), *REL_RHO_WINDOW)
+                if rel_curves else None
+            )
     except NotImplementedError as exc:
         # the training entry points are stubs until the backbone repos are cloned; say so
         # rather than writing a placeholder that looks like a result
@@ -168,6 +194,14 @@ def run_one(cfg, wandb_run=None, strict_pins=True):
     return row
 
 
+def _pool_rel(rel_curves):
+    """Pool a list of per-graph relative-distance curves the same way
+    sensitivity.average_curves pools absolute ones (it is generic over integer-keyed
+    curves, so this is exactly that call, factored out for readability at the call site)."""
+    from sensitivity import average_curves as _avg
+    return _avg(rel_curves)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--backbone", nargs="+", choices=BACKBONES, default=list(BACKBONES))
@@ -178,6 +212,9 @@ def main():
                     help="reduced: 3 seeds for gps (primary backbone), 1 for san/graphormer")
     ap.add_argument("--num-target-nodes", type=int, default=None,
                     help="from scripts/calibrate_target_nodes.py; required for real runs")
+    ap.add_argument("--num-probe-graphs", type=int, default=None,
+                    help="test graphs sampled per cell for the sensitivity probe; "
+                         "default config.PROBE_N_GRAPHS")
     ap.add_argument("--results-dir", default="results")
     ap.add_argument("--csv", default="results/runs.csv")
     ap.add_argument("--dry-run", action="store_true")
@@ -188,7 +225,8 @@ def main():
     ap.add_argument("--no-require-cache", dest="require_cache", action="store_false")
     args = ap.parse_args()
 
-    kw = dict(results_dir=args.results_dir, num_target_nodes=args.num_target_nodes)
+    kw = dict(results_dir=args.results_dir, num_target_nodes=args.num_target_nodes,
+              num_probe_graphs=args.num_probe_graphs)
     configs = list(grid(args.backbone, args.pe, args.dataset, args.seed, **kw))
     if args.preset == "reduced":
         # README fallback: publication-quality seed variance on the primary backbone only

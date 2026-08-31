@@ -109,13 +109,86 @@ def _demo_factory(seed=0):
 
 
 def load_real(backbone, pe, dataset, checkpoint, n_graphs):
-    raise NotImplementedError(
-        "Wire this to your trained backbone once its repo is cloned. It must return "
-        "(model_fn_factory, graphs, n_shared_feats), where model_fn_factory(data) yields "
-        "the `model_fn(x) -> [n, p]` callable described in run_experiment.make_model_fn "
-        "and `graphs` is a sample of TEST graphs. Until then use --demo to exercise the "
-        "calibration pipeline itself."
-    )
+    """Load a trained checkpoint and return (model_fn_factory, graphs, n_shared_feats).
+
+    THE CONTRACT sweep_target_nodes ACTUALLY NEEDS, READ THIS BEFORE CHANGING IT: it calls
+    `compute_sensitivity_curve(model_fn_factory(data), data, ...)` -- the SAME `data` object
+    is used both to build model_fn AND as the thing whose `.x` gets differentiated. Demo
+    mode satisfies this because its synthetic graphs are already continuous (`data.x =
+    torch.randn(...)`). GraphGPS's real input is NOT: LRGB node features are integer
+    atom-type indices consumed by an nn.Embedding lookup, so d h / d x is undefined for
+    them (see backends/graphgps_backend.py's header) -- the probe must instead differentiate
+    h^(0), the encoder's OUTPUT. `graphs` below is therefore a list of h^(0)-space
+    `probe_data` objects (built once via run_experiment.make_model_fn), each with its
+    matching `model_fn` attached as an attribute, so `factory(data)` can just read it back
+    off `data` rather than needing the original raw graph in scope.
+
+    Only "gps" is wired, matching run_experiment.PROBE_WIRED_BACKBONES. `checkpoint` must be
+    a state_dict saved by GraphGPS's own training loop; `build_graphgym_cfg` reconstructs
+    the exact architecture that state_dict was trained under from (pe, dataset) -- passing
+    the wrong `--pe` for a given checkpoint loads weights into a differently-shaped model
+    and fails loudly (via `load_state_dict(strict=False)`'s missing/unexpected keys), not
+    silently.
+    """
+    if backbone != "gps":
+        raise NotImplementedError(
+            f"load_real is wired for 'gps' only (matches run_experiment.PROBE_WIRED_"
+            f"BACKBONES); '{backbone}' still needs its own probe wrapper. Use --demo to "
+            "exercise the calibration pipeline itself in the meantime."
+        )
+    if not checkpoint:
+        raise ValueError(
+            "--checkpoint is required for backbone=gps: this loads a TRAINED model's "
+            "weights, it does not train one. Point it at the checkpoint GraphGPS's own "
+            "training loop wrote for this exact (pe, dataset) -- see cfg.out_dir in "
+            "backends.graphgps_backend.build_graphgym_cfg."
+        )
+
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
+    from config import RunConfig
+    from run_experiment import make_model_fn, sample_test_graphs
+    from backends.graphgps_backend import build_graphgym_cfg, ensure_graphgps_importable
+
+    graphgps_dir = ensure_graphgps_importable()
+    from torch_geometric.graphgym.loader import create_loader
+    from torch_geometric.graphgym.model_builder import create_model
+
+    # seed=0 here reconstructs the ARCHITECTURE only -- calibration is a property of the
+    # probe and the graph regime, not of the training seed, so which seed's checkpoint you
+    # point at should not matter, and it is not recorded as part of what this returns.
+    run_cfg = RunConfig(backbone=backbone, pe=pe, dataset=dataset, seed=0)
+    build_graphgym_cfg(run_cfg, graphgps_dir)
+    loaders = create_loader()
+    model = create_model()
+
+    import torch
+    state = torch.load(checkpoint, map_location="cpu")
+    state_dict = state.get("model_state", state) if isinstance(state, dict) else state
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    if missing or unexpected:
+        raise RuntimeError(
+            f"checkpoint at {checkpoint} does not match the architecture built for "
+            f"(pe={pe!r}, dataset={dataset!r}): missing={missing}, unexpected={unexpected}. "
+            "This usually means --pe doesn't match what the checkpoint was trained with."
+        )
+    model.eval()
+
+    test_dataset = loaders[-1].dataset
+    raw_graphs = [data for _, data in sample_test_graphs(test_dataset, n_graphs, seed=0)]
+
+    graphs = []
+    n_shared_feats = None
+    for raw in raw_graphs:
+        model_fn, probe_data, meta = make_model_fn(model, backbone, raw)
+        probe_data.model_fn = model_fn   # stashed so factory() below needs no extra state
+        graphs.append(probe_data)
+        if n_shared_feats is None:
+            n_shared_feats = meta["dim_inner"]
+
+    def factory(data):
+        return data.model_fn
+
+    return factory, graphs, n_shared_feats
 
 
 def plot(rows, rec, out_png, d_min, d_max, title_extra=""):

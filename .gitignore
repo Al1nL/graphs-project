@@ -13,3 +13,13 @@ results/
 venv/
 .ipynb_checkpoints/
 .DS_Store
+cache
+raw_data
+logs/
+results/
+1
+files.zip
+check_shrinkage.py
+*.pt
+*.tmp
+configs/san/*.json

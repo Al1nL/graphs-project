@@ -7,11 +7,14 @@ adds (a) a shared PE-precomputation module so every backbone sees the *same* PE 
 and (b) a shared, backbone-agnostic long-range sensitivity probe.
 
 > **Status note:** the real LRGB data is downloaded and all three PE caches are built and
-> verified; the probe, the calibration tool and the GraphGPS integration have been run
-> against real graphs. What has *not* happened is a training run — no model has been
-> trained, `results/` is empty, and there is no GPU here, so every number in the paper is
-> still ahead of us. See "Implementation status" for what is wired and what is a stub.
-> Import paths for the not-yet-cloned backbones were checked by hand against each library's
+> verified; the probe, the calibration tool, and the GraphGPS + SAN training integrations
+> have been run against real graphs. GraphGPS's probe wrapper is wired; SAN's is not yet.
+> The orchestration bug that used to make a real grid run silently discard every metric
+> (train_fn was never called from `run_experiment.main()`; `launch.py` called it but threw
+> the result away) is fixed — see "Implementation status". No model has been trained to
+> completion here and `results/` is empty; there is no GPU in this environment, so every
+> number in the paper is still ahead of us.
+> Import paths for the not-yet-cloned Graphormer backend were checked by hand against its
 > documented API as of early 2026 — re-verify against the exact commit you clone, since
 > upstream repos drift.
 
@@ -52,19 +55,23 @@ graphs-project/
 │   │   ├── san_adapter.py        <- maps PE tensors -> SAN's LPE input format
 │   │   └── graphormer_adapter.py <- maps PE tensors -> Graphormer spatial_pos/edge_input/attn-bias
 │   ├── backends/
-│   │   └── graphgps_backend.py   <- REAL integration: drives GraphGPS's own train loop, and
-│   │                                wraps a trained GPSModel for the Jacobian probe
+│   │   ├── graphgps_backend.py   <- REAL integration: drives GraphGPS's own train loop, and
+│   │   │                            wraps a trained GPSModel for the Jacobian probe
+│   │   └── san_backend.py        <- REAL integration: drives SAN's own model classes (DGL) for
+│   │                                training; probe wrapper is a stub, see its own docstring
 │   ├── config.py                 <- run schema (backbone x pe x dataset x seed) + version locking
 │   ├── dataset_meta.py           <- per-dataset caps, ρ windows, GRPE bucketing
 │   ├── calibration.py            <- target-node budget sweep + decision rule
 │   ├── sensitivity.py            <- backbone-agnostic Jacobian long-range sensitivity s̄(d),
 │   │                                plus the scale-free summaries (s̃(d), ρ) and the
 │   │                                graph-clustered bootstrap
-│   └── run_experiment.py         <- single entry point: --backbone --pe --dataset --seed
+│   └── run_experiment.py         <- single entry point: --backbone --pe --dataset --seed;
+│                                    also where run_cell() lives -- trains, probes, writes JSON
 ├── configs/
-│   ├── graphgps/                 <- 15 GraphGym YAML configs (5 PE x 3 datasets)
-│   ├── san/                      <- 15 JSON configs (SAN's own config format)
-│   └── graphormer/               <- 15 JSON configs (fairseq-style args)
+│   ├── README.md                 <- which of these three directories code ACTUALLY reads
+│   ├── graphgps/                 <- 15 YAML files, decorative (see configs/README.md)
+│   ├── san/                      <- 15 JSON configs, LIVE -- san_backend.py reads these
+│   └── graphormer/                <- 15 JSON configs, decorative (backend still a stub)
 ├── docs/
 │   └── analysis-plan.md          <- amended success criteria + pre-registered ρ windows.
 │                                    Dated BEFORE any results exist; read this first.
@@ -73,8 +80,11 @@ graphs-project/
 ├── scripts/
 │   ├── launch.py                 <- THE entry point: grid, seeding, pre-flight, CSV/W&B
 │   ├── calibrate_target_nodes.py <- one-off convergence check for the probe's T
+│   ├── generate_san_configs.py   <- regenerates configs/san/*.json from san_backend.py's
+│   │                                own PE_SPEC/BASE_NET_PARAMS/TRAIN_PARAMS
 │   ├── run_all.sh                <- superseded by launch.py; kept for reference
-│   └── aggregate_results.py      <- Table 1 + figures; ρ is the primary statistic
+│   ├── aggregate_results.py      <- Table 1 + figures; ρ is the primary statistic
+│   └── slurm/                    <- TAU CS cluster job scripts, see scripts/slurm/README.md
 ├── raw_data/                     <- gitignored, 5.2 GB. LRGB downloads; see setup step 4.
 ├── cache/                        <- gitignored, 5.0 GB. Built PE caches, one file per graph.
 └── results/                      <- EMPTY, and not in a fresh clone; run_experiment.py
@@ -85,34 +95,58 @@ graphs-project/
 
 The shared machinery — PE computation and cache, the sensitivity probe, calibration,
 aggregation, the launcher — is complete and tested. The per-backbone training integrations
-are not, and that is the critical path:
+are the critical path; GraphGPS's is wired end to end, SAN's is now wired for training
+(probe not yet), Graphormer's remains a stub:
 
 | backbone | training | probe wrapper | notes |
 |---|---|---|---|
 | GraphGPS | **wired** (4 of 5 PEs) | **wired** | `src/backends/graphgps_backend.py`; GRPE refused, see below |
-| SAN | stub | stub | repo not cloned or forked yet |
+| SAN | **wired** (4 of 5 PEs) | stub | `src/backends/san_backend.py`; GRPE refused (same reason as GPS) |
 | Graphormer | stub | stub | repo not cloned or forked yet |
 
-`graphgps_train` drives GraphGPS's **own** run loop, starting from its tuned reference YAML
-for the dataset and overriding only the PE block, so every arm differs in exactly one thing.
-`make_gps_model_fn` runs a trained `GPSModel` up to — but not including — the task head and
-returns node embeddings. Both import GraphGPS lazily, so `--dry-run` and the whole test
-suite work on a machine with no GraphGPS environment.
+**Fixed this pass:** `run_experiment.py`'s `main()` had the line that calls `train_fn`
+commented out, and `launch.py`'s `run_one()` called the training entry point directly but
+discarded everything it returned — no metric, no sensitivity curve, and no JSON ever
+written to `results/`. A real grid run would have trained real models and thrown away
+every number. `run_experiment.run_cell()` is the fix: it is now the single function that
+trains, probes (where a probe wrapper exists), and writes the result file; both `main()`
+and `launch.py:run_one()` call it. `scripts/calibrate_target_nodes.py`'s `load_real()` was
+also a hard stub blocking the mandatory pre-grid calibration step; it is now wired for
+`gps`, and correctly probes `h^(0)` rather than GraphGPS's raw discrete-index input (see
+that function's docstring for why the naive version would have been silently wrong).
 
-Two things to know before trusting cross-PE numbers from the GraphGPS arm:
+**Disclosed, not patched:** `graphgps_train` (and now `san_train`) point their backbone at
+its OWN internal PE encoder for LapPE/RWSE/SignNet, not at `src/pe/cache.py`. That is an
+unavoidable consequence of driving the upstream code rather than reimplementing it, but it
+means "every backbone sees the identical PE" is not yet literally true for those three PE
+arms on either backbone — patching two upstream repos' internal encoders to consume an
+external cache is a bigger, riskier change than either integration pass should make
+silently. If a specific cross-backbone PE claim depends on this, verify numerical agreement
+on a handful of real graphs first.
 
-- **GraphGPS+GRPE raises rather than running.** GraphGPS has no native attention-bias hook,
-  so GRPE needs `GPSLayer`'s self-attention replaced by
-  `adapters.graphgps_adapter.GRPEBiasedAttention` and the `spd_bucket`/`edge_type` tensors
-  threaded onto the batch. That is an architectural addition, not a config change, and is
-  left for a separate pass; the other four arms are drop-ins.
+`graphgps_train`/`san_train` each drive their backbone's **own** run loop, starting from
+its tuned reference config for the dataset and overriding only the PE block, so every arm
+differs in exactly one thing. `make_gps_model_fn`/`make_san_model_fn` run a trained model up
+to — but not including — the task head and return node embeddings. All four import their
+backbone lazily, so `--dry-run` and the whole test suite work on a machine with neither
+environment set up.
+
+Two things to know before trusting cross-PE numbers from either wired backbone:
+
+- **GRPE raises rather than running, on both backbones.** Neither GraphGPS nor SAN has a
+  native attention-bias hook; GRPE needs `GraphGPS's GPSLayer` / `SAN`'s attention class
+  self-attention replaced by `adapters.graphgps_adapter.GRPEBiasedAttention` /
+  `adapters.san_adapter.SANGammaGRPEBias` and the `spd_bucket`/`edge_type` tensors threaded
+  onto the batch. That is an architectural addition, not a config change, and is left for a
+  separate pass; the other four arms are drop-ins.
 - **The content width differs per PE, and this is not fixable in the probe.** GraphGPS holds
   `dim_inner` constant and makes room for the PE by *shrinking* the atom encoder, so at
   `dim_inner=96` the content channels measure 96 / 80 / 76 / 64 / 96 for
   No-PE / LapPE / RWSE / SignNet / GRPE. Slicing to content compares ‖J‖_F over different
   column counts (which `assert_shared_width` correctly refuses); using the full `dim_inner`
   is identical across arms but perturbs PE channels too. `probe_widths` returns both and
-  takes no side — the choice belongs in the paper, not hidden in a wrapper.
+  takes no side — the choice belongs in the paper, not hidden in a wrapper. `run_probe`
+  (in `run_experiment.py`) takes the `dim_inner` side and records that choice in the result.
 
 ## Reporting the sensitivity results
 
