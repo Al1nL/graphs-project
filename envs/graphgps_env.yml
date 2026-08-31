@@ -1,0 +1,105 @@
+# Conda environment for the GraphGPS arm of the grid.
+#
+#     conda env create -f envs/graphgps_env.yml
+#     conda activate graphgps
+#     cd ../GraphGPS && pip install -e .        # registers the `graphgps` package
+#
+# This is GraphGPS's OWN documented recipe (README "Python environment setup with Conda"),
+# read out of the pinned clone at 2801570 rather than reconstructed from memory, with only
+# the additions this harness needs on top. Keep it that way: the pin in
+# src/config.PINNED_COMMITS exists so the published model is what actually runs, and an
+# environment that drifts from the one upstream tested against defeats the pin as surely
+# as moving the commit would.
+#
+# Do NOT install this alongside envs/san_env.yml. They disagree on python, pytorch, CUDA
+# and PyG, and SAN additionally needs DGL. One conda env per backbone, always.
+#
+# ---------------------------------------------------------------------------------------
+# CUDA: pytorch-cuda=11.7 pairs with pytorch 1.13, which is what GraphGPS pins. If the
+# cluster's driver cannot take cu117 this is the line to change -- but changing it means
+# also rebuilding pyg-lib from the matching wheel index below, and re-checking that
+# torch-scatter resolves. Verify with `python -c "import torch; print(torch.cuda.is_available())"`
+# before queueing a grid, not after.
+# ---------------------------------------------------------------------------------------
+
+name: graphgps
+
+channels:
+  - pytorch
+  - nvidia
+  - pyg
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.10
+  - pip
+
+  # --- upstream's pinned core. Versions are GraphGPS's, not ours.
+  - pytorch=1.13
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=11.7
+  - pyg=2.2
+
+  # torch-scatter is pulled in by the `pyg` metapackage, but named explicitly because our
+  # import path depends on it directly and not incidentally: graphgps/encoder/
+  # signnet_pos_encoder.py and layer/gatedgcn_layer.py both `from torch_scatter import
+  # scatter` at module level, so `import graphgps` fails outright without it.
+  - pytorch-scatter
+
+  - fsspec
+
+  # --- shared-harness deps (src/pe, src/sensitivity.py, src/run_experiment.py). The probe
+  # runs in THIS env, in-process against the trained model, so they belong here and not
+  # only in requirements.txt.
+  - numpy
+  - scipy
+  - networkx
+  - pandas
+  - pyyaml
+  - tqdm
+  - matplotlib
+  - scikit-learn
+  - joblib
+
+  - pip:
+      # pyg-lib's wheel index is keyed to the exact torch+CUDA build above. If you change
+      # pytorch-cuda, change this URL to match or the install silently resolves to nothing.
+      - --find-links https://data.pyg.org/whl/torch-1.13.0+cu117.html
+      - pyg-lib
+
+      - pytorch-lightning
+      - yacs
+      - torchmetrics
+      - tensorboardX
+      - ogb
+
+      # performer-pytorch is NOT optional despite GPS not using Performer attention by
+      # default: graphgps/layer/gps_layer.py imports SelfAttention from it at module
+      # level, so it is required just to import the package. It brings einops,
+      # axial-positional-embedding and local-attention with it.
+      - performer-pytorch
+
+      # Imported at module scope by graphgps/logger.py. cfg.wandb.use is forced False in
+      # backends/graphgps_backend.py (the launcher owns logging), but the import still has
+      # to resolve.
+      - wandb
+
+# ---------------------------------------------------------------------------------------
+# DELIBERATELY OMITTED -- all three are optional on our path, and each is a real install
+# burden, so they are left out rather than carried "just in case":
+#
+#   apex               guarded by try/except in graphgps/layer/performer_layer.py; only
+#                      gates fp16 Performer attention, which GPS's LRGB configs do not use.
+#   fast_transformers  imported INSIDE causal_linear_attention(); reachable only via causal
+#                      linear attention, which GPS does not call.
+#   rdkit, openbabel   upstream lists them for OGB-LSC PCQM4Mv2. The dataset module that
+#                      needs them is imported inside a function (master_loader.py:473), so
+#                      the three LRGB datasets in this study never reach it. Add them back
+#                      only if the study grows a PCQM4Mv2 arm.
+#
+# If one of these ever surfaces as an ImportError, that means the import path changed --
+# check what pulled it in before adding the package, because it may mean a code path was
+# entered that this study did not intend to enter.
+# ---------------------------------------------------------------------------------------
