@@ -42,17 +42,26 @@ saying exactly why, so a partially-wired backbone still gives you a real task-me
 rather than nothing.
 
 --------------------------------------------------------------------------------------
-A LIMITATION THIS FIX DOES NOT PAPER OVER (see backends/graphgps_backend.py header)
+EVERY BACKBONE NOW SEES THE SAME PE (this used to be false for the GraphGPS arm)
 --------------------------------------------------------------------------------------
-GraphGPS's own `posenc_LapPE`/`RWSE`/`SignNet` encoders compute the PE internally from the
-raw graph -- `graphgps_train` points GraphGPS at ITS OWN implementation, not at
-`src/pe/cache.py`'s precomputed, hand-verified tensors. That means "every backbone sees the
-identical PE" is not yet literally true for the GraphGPS arm; it is GraphGPS's own LapPE,
-not ours. Patching GraphGPS's internal encoder to consume an external cache is a bigger,
-riskier change than this pass should make silently, so it is disclosed here and in the
-README's "Implementation status" rather than fixed. If this matters for a specific claim,
-verify numerical agreement between the two on a handful of real graphs before trusting a
-cross-backbone PE comparison that depends on it.
+GraphGPS's `posenc_LapPE`/`RWSE`/`SignNet` encoders compute the PE internally from the raw
+graph, so for a while `graphgps_train` trained on GraphGPS's OWN LapPE while san_backend
+trained on `src/pe/cache.py`'s -- and those are different encodings, not two spellings of
+one. The comparison the whole study rests on was confounded at its root.
+
+`backends/graphgps_pe_cache.py` closes it by replacing GraphGPS's PE PRE-TRANSFORM (not
+its encoders, which are untouched) with a reader over this repo's cache. Four conventions
+had to be reconciled to do that honestly -- Laplacian normalisation, whether the trivial
+eigenvector is kept, eigenvector count, and zero- vs NaN-padding, the last of which would
+have corrupted every small graph silently. That file's header is the authority on what was
+reconciled and why our definition is the one that wins.
+
+Two consequences worth knowing before reading a result:
+  * `laplacian_norm` and `eigvec_norm` in GraphGPS's reference YAMLs are now INERT. They
+    configured a computation that no longer runs.
+  * The GPS arm no longer trains on the PE its tuned hyperparameters were tuned against,
+    so its task metric may move relative to published GraphGPS numbers. That is the
+    intended trade -- a tuned but incomparable number answers no question this study asks.
 """
 
 import argparse

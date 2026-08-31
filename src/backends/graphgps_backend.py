@@ -115,8 +115,16 @@ DATASET_NODE_ENCODER = {
     "pascalvoc-sp": "VOCNode",
 }
 
-# PE -> (GraphGym encoder suffix, posenc config key, dim_pe). dim_pe values match
-# src/pe/compute_pe.py's K_LAP / K_RWSE so the two definitions stay aligned.
+# Widths of the cache these encoders are fed from -- src/pe/compute_pe.py's K_LAP/K_RWSE.
+# Duplicated here rather than imported so that build_graphgym_cfg stays importable without
+# torch_geometric.utils (the launcher's --dry-run and most of the test suite depend on
+# that). graphgps_pe_cache.install cross-checks both against the built cache's manifest
+# before a run starts, so a drift here fails loudly rather than silently.
+K_LAP = 16
+K_RWSE = 20
+
+# PE -> (GraphGym encoder suffix, posenc config key, dim_pe). dim_pe is the encoder's
+# OUTPUT width; see build_graphgym_cfg for why that is not the same as max_freqs.
 PE_SPEC = {
     "none": (None, None, 0),
     "lappe": ("LapPE", "posenc_LapPE", 16),
@@ -159,11 +167,14 @@ def build_graphgym_cfg(run_cfg, graphgps_dir: str):
         block = getattr(cfg, posenc_key)
         block.enable = True
         block.dim_pe = dim_pe
-        if posenc_key == "posenc_LapPE":
-            # keep the eigenvector count aligned with compute_pe.K_LAP
-            block.eigen.max_freqs = dim_pe
+        if posenc_key in ("posenc_LapPE", "posenc_SignNet"):
+            # max_freqs is how many eigenvectors come IN; dim_pe is how many channels go
+            # OUT. They coincide at 16 for LapPE and differ for SignNet (16 in, 32 out),
+            # so this must be K_LAP and not dim_pe -- using dim_pe would have asked
+            # SignNet's encoder for 32 eigenvectors the cache does not have.
+            block.eigen.max_freqs = K_LAP
         if posenc_key == "posenc_RWSE":
-            block.kernel.times_func = f"range(1,{dim_pe + 1})"
+            block.kernel.times_func = f"range(1,{K_RWSE + 1})"
     cfg.dataset.node_encoder_name = node_enc
 
     cfg.seed = run_cfg.seed
@@ -209,7 +220,24 @@ def graphgps_train(run_cfg, graphgps_dir: Optional[str] = None) -> dict:
     seed_everything(cfg.seed)
     auto_select_device()
 
+    # Point GraphGPS's loader at THIS repo's PE cache before it builds anything. Without
+    # this the GPS arm trains on GraphGPS's own LapPE/RWSE/SignNet while the SAN arm
+    # trains on the cache's, and the two are not the same encoding -- see
+    # graphgps_pe_cache's header for the four definitions that differ. Must happen after
+    # build_graphgym_cfg (which sets max_freqs to the cache's width) and before
+    # create_loader (which runs the pre-transform being replaced).
+    from backends.graphgps_pe_cache import install as install_pe_cache
+    pe_cache = install_pe_cache(run_cfg, cfg) if run_cfg.pe != "none" else None
+
     loaders = create_loader()
+
+    if pe_cache is not None and pe_cache.calls == 0:
+        raise RuntimeError(
+            f"PE cache patch was installed for pe={run_cfg.pe!r} but GraphGPS never "
+            "called it, so the model is about to train on whatever encoding its own "
+            "pipeline produced. The upstream loader no longer routes through "
+            "master_loader.compute_posenc_stats under the pin -- fix the patch target in "
+            "backends/graphgps_pe_cache.install before trusting this run.")
     loggers = create_logger()
     model = create_model()
     optimizer = create_optimizer(

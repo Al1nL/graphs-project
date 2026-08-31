@@ -115,14 +115,33 @@ also a hard stub blocking the mandatory pre-grid calibration step; it is now wir
 `gps`, and correctly probes `h^(0)` rather than GraphGPS's raw discrete-index input (see
 that function's docstring for why the naive version would have been silently wrong).
 
-**Disclosed, not patched:** `graphgps_train` (and now `san_train`) point their backbone at
-its OWN internal PE encoder for LapPE/RWSE/SignNet, not at `src/pe/cache.py`. That is an
-unavoidable consequence of driving the upstream code rather than reimplementing it, but it
-means "every backbone sees the identical PE" is not yet literally true for those three PE
-arms on either backbone — patching two upstream repos' internal encoders to consume an
-external cache is a bigger, riskier change than either integration pass should make
-silently. If a specific cross-backbone PE claim depends on this, verify numerical agreement
-on a handful of real graphs first.
+**Every backbone now reads the same PE.** Both arms consume `src/pe/cache.py` for
+LapPE/RWSE/SignNet, so a difference between them is attributable to the architecture rather
+than to two libraries disagreeing about what "LapPE" means:
+
+- **SAN** always did, via `_PECacheDataset` → `_load_pe_cache` in `_build_loaders`.
+- **GraphGPS** did not, until `src/backends/graphgps_pe_cache.py`. It computes its PE as a
+  loader pre-transform, so the fix replaces that pre-transform — GraphGPS's encoders are
+  untouched, only the numbers reaching them change.
+
+Reconciling the two took more than a format shim; four conventions genuinely disagreed
+(Laplacian normalisation, whether the trivial eigenvector is dropped, eigenvector count,
+and zero- vs NaN-padding). The last is the dangerous one: GraphGPS's encoders mask padded
+frequencies with `torch.isnan`, so handing them our zero-padding would have been read as a
+real all-zero eigenvector on every graph with fewer than k+1 nodes — no error, just wrong
+numbers on the small molecules. `graphgps_pe_cache.py`'s header documents each one.
+
+Two consequences to know before reading a result. GraphGPS's reference YAMLs still contain
+`laplacian_norm` and `eigvec_norm`, but they are now **inert** — they configured a
+computation that no longer runs. And the GPS arm no longer trains on the PE its tuned
+hyperparameters were tuned against, so its task metric may move relative to published
+GraphGPS numbers; that is the intended trade, since a tuned but incomparable number answers
+no question this study asks.
+
+**Still genuinely open:** GRPE is unavailable on the GraphGPS arm (no native attention-bias
+hook — it needs a real architectural addition, not a config change), and SAN's GRPE applies
+its distance bias post-softmax rather than to the logits. Neither is a PE-definition issue;
+both are recorded in the relevant backend's header.
 
 `graphgps_train`/`san_train` each drive their backbone's **own** run loop, starting from
 its tuned reference config for the dataset and overriding only the PE block, so every arm
