@@ -149,6 +149,133 @@ CHANGELOG (this pass)
   into. Only applies when net_params["full_graph"] is True; pascalvoc-sp
   (full_graph=False) always uses the fixed-batch_size path regardless of
   this flag.
+- Extended the RWSE encoding fix (originally built only for peptides-func's
+  _SAN_RWSE class) to the other two datasets' model classes:
+  _SAN_NodeLPE_Regression (peptides-struct) and _SAN_NodeClassification
+  (pascalvoc-sp). Both of these use a DATASET-level _variant
+  ("regression" / "node_classification") that build_san_net_params
+  preserves over PE_SPEC's PE-level _variant -- meaning, before this fix,
+  --pe rwse on either of these datasets would have silently routed through
+  the same eigenvector-shaped linear_A/PE_Transformer/mean-pool-across-steps
+  path diagnosed as destroying RWSE's step-order signal on peptides-func
+  (see _SAN_RWSE's docstring), never reaching the fix at all. Both classes
+  now check net_params["pe"] (a new key set by build_san_net_params,
+  necessary because net_params["LPE"] == "node" is shared by lappe/rwse/grpe
+  and can't disambiguate them) and use a plain per-node MLP over the full
+  RWSE vector when pe == "rwse", matching _SAN_RWSE's approach. NOT yet
+  validated on real training runs for either dataset -- validated so far
+  only for peptides-func's _SAN_RWSE (climbing well in early epochs at time
+  of writing). Smoke-test both datasets' rwse runs before trusting this.
+- Fixed a crash in _SAN_NodeLPE_Regression (peptides-struct): it built
+  SAN_NodeLPE(net_params) unconditionally, but upstream SAN_NodeLPE.__init__
+  unconditionally reads net_params['LPE_dim']/['LPE_n_heads']/['LPE_layers']
+  at construction time -- even when LPE=="none" (it only checks that flag
+  later, inside forward). PE_SPEC["none"] intentionally omits those keys
+  since they're meaningless without a PE, so --pe none on peptides-struct
+  crashed with KeyError: 'LPE_layers' the first time it was actually run
+  (during the hyperparameter sweep -- this path had never been exercised
+  before). Fixed by filling in harmless defaults via setdefault before
+  constructing SAN_NodeLPE; they're inert when LPE=="none". Added the same
+  defensive setdefault to _SAN_GRPE, which has the identical unconditional-
+  construction pattern -- currently unreachable in practice since
+  PE_SPEC["grpe"] always supplies those keys, but guarded anyway rather
+  than relying on that staying true. _SAN_NodeClassification (pascalvoc-sp)
+  was checked and does NOT have this issue -- it builds its LPE components
+  itself, conditionally on lpe != "none", rather than delegating to
+  upstream SAN_NodeLPE.
+- Fixed a second bug in the same code path, surfaced immediately after the
+  KeyError fix above: _SAN_NodeLPE_Regression.forward required EigVecs/
+  EigVals with no defaults, but _forward_pass calls model(bg, h, e) with
+  only 3 args for pe == "none" -- TypeError: missing 2 required positional
+  arguments. Fixed by defaulting both to None and adding a third forward
+  branch for pe == "none": since the base SAN_NodeLPE's embedding_h output
+  width is fixed at (GT_hidden_dim - LPE_dim) regardless of whether a real
+  PE is used (see the setdefault fix above), a same-width zero vector is
+  concatenated in place of a real PE when none is requested, keeping h's
+  concatenated width equal to GT_hidden_dim as every downstream GT layer
+  expects. _SAN_GRPE is unaffected (only ever invoked with pe == "grpe",
+  which always supplies real EigVecs/EigVals). _SAN_NodeClassification is
+  unaffected (its embedding_h width is already conditionally sized on
+  lpe != "none", so it never needs a zero-pad fallback).
+- Fixed a third bug in the same forward, also a pre-existing issue predating
+  every other fix in this file (surfaced now only because this was the
+  first time ANY PE was actually run on peptides-struct, not something
+  specific to --pe none): _SAN_NodeLPE_Regression.forward called
+  base.embedding_e(e), but upstream SAN_NodeLPE actually names this
+  attribute embedding_e_real (confirmed via a checkpoint state_dict
+  mismatch seen earlier in debugging: unexpected key
+  "embedding_e_real.bond_embedding_list...."). AttributeError:
+  'SAN_NodeLPE' object has no attribute 'embedding_e'. Fixed with a
+  getattr-guarded fallback that prefers embedding_e_real if present.
+  _SAN_GRPE is unaffected: its forward calls self._base(...) directly
+  (upstream's own forward method), rather than a hand-replicated copy, so
+  it always uses upstream's real attribute names automatically.
+- Added gradient clipping (clip_grad_norm_, max_norm=1.0) before every
+  optimizer.step(). Added after observing pascalvoc-sp's --pe none
+  --gamma 1e-5 sweep run freeze to a bit-identical output (val/test AP/F1
+  unchanged for 16 straight epochs, starting from epoch 0) -- the classic
+  signature of an early exploding-gradient step collapsing the model into
+  a saturated/dead region. No-op for gradients already under max_norm, so
+  this should not change behavior for runs that weren't hitting this
+  failure mode.
+- Added class-weighted CrossEntropyLoss for pascalvoc-sp
+  (_compute_pascalvoc_class_weights), computed as inverse class frequency
+  over the REAL training set (not a diagnostic sample), normalized so mean
+  weight is ~1. Motivation: pascalvoc-sp's labels are heavily imbalanced
+  (majority class ~71% of nodes in a diagnostic sample; several classes
+  under 1%), but training used plain unweighted CrossEntropyLoss while the
+  eval metric (macro-F1) weights every class equally regardless of
+  frequency -- a real train/eval objective mismatch that unweighted loss
+  gives the model little incentive to address. _build_loaders now returns
+  a 4th value (class_weights, None for the other two datasets) alongside
+  the 3 loaders; _loss_for takes class_weights/device kwargs and applies
+  them only for pascalvoc-sp. NOT yet validated against a real training
+  run -- confirmed only that node_feat_dim=14/edge_feat_dim=2/n_classes=21
+  (BASE_NET_PARAMS's hardcoded values) all correctly match the real data,
+  ruling out a shape-mismatch bug as the cause of pascalvoc-sp's low
+  scores; the imbalance/objective-mismatch hypothesis above is untested.
+- Implemented the sensitivity probe for SAN (make_san_model_fn), previously a
+  stub raising NotImplementedError. Mirrors graphgps_backend.make_gps_model_fn's
+  contract: differentiates from h^(0) (post-embedding, pre-GT-layers node
+  representation, since raw atom-index features have no derivative), returns
+  final-layer node embeddings (not pooled), and reports dim_inner as
+  n_shared_feats -- which for SAN is ALWAYS exactly GT_hidden_dim regardless of
+  PE (embedding_h width + PE-vector width sum to GT_hidden_dim algebraically),
+  so unlike GraphGPS there is no shrinking-content-channel tradeoff to choose
+  between. Added _PEAttachedDataset: a probe-only wrapper (separate from
+  training's tuple-yielding _PECacheDataset) that attaches PE fields plus _pe/
+  _full_graph onto each Data object, needed because SAN's PE comes from an
+  external cache keyed by graph index rather than being computed internally
+  from raw features the way GraphGPS's encoder does. san_train now returns
+  "probe_dataset" in its result dict; run_experiment.run_cell needs a small
+  patch (train_out.get("probe_dataset", loaders[-1].dataset)) to use it instead
+  of the generic loaders[-1].dataset path, and "san" needs adding to
+  PROBE_WIRED_BACKBONES -- see the accompanying note for that change, made
+  outside this file.
+- Two bugs found by an actual first run of the probe on peptides-func:
+  (1) sensitivity.py's is_grads_batched fast path raises TypeError on this
+  env's PyTorch 1.9.0 (added ~1.11) -- not a SAN-specific bug, but it blocked
+  every backbone's probe here. sensitivity.py's own fallback already existed
+  for this exact situation but only caught (RuntimeError, NotImplementedError),
+  not TypeError; widened to catch TypeError too. Falls back to an unbatched
+  VJP loop -- same numbers, slower. (2) torch.utils.checkpoint on this
+  PyTorch version raises "Checkpointing is not compatible with .grad()" the
+  moment sensitivity.py's torch.autograd.grad() touches a graph that passed
+  through a checkpointed segment -- affects every full_graph=True dataset
+  (peptides-func, peptides-struct), since enable_gradient_checkpointing
+  permanently wraps every GT layer's forward at train time. Fixed by having
+  enable_gradient_checkpointing also store the ORIGINAL unwrapped forward as
+  layer._probe_forward; make_san_model_fn's model_fn now calls that directly
+  instead of the checkpoint-wrapped layer.forward, bypassing checkpointing
+  entirely for probing (which doesn't need its memory savings -- one graph
+  at a time, not a full batch). Layers that were never checkpointed
+  (pascalvoc-sp, full_graph=False) don't have this attribute; model_fn falls
+  back to calling the layer directly for those. Confirmed via one real run
+  on peptides-func --pe none that training + both these fixes work together
+  end-to-end; NOT yet confirmed for the other 4 PE variants or the other two
+  datasets -- expect at least one of the class-specific attribute-name
+  guesses in make_san_model_fn (documented in its own docstring) to need a
+  similar fix once those are actually run.
 """
 
 import gc
@@ -199,9 +326,7 @@ def _build_san_model(net_params):
     from layers.mlp_readout_layer import MLPReadout
     lpe = net_params.get("LPE", "none")
     variant = net_params.get("_variant", None)
-    
-    if variant == "rwse":
-        return _SAN_RWSE(net_params)
+
     if variant == "signnet":
         return _SAN_SignNetLPE(net_params)
     if variant == "grpe":
@@ -375,89 +500,6 @@ class _GRPEAttentionLayer(torch.nn.Module):
 
         return h_out, e_out
 
-class _SAN_RWSE(torch.nn.Module):
-    """SAN with RWSE positional encoding, encoded correctly.
-
-    Unlike lappe/signnet (which route through SAN_NodeLPE's PE_Transformer --
-    designed for a permutation-invariant SET of eigenvectors disambiguated by
-    eigenvalue), RWSE features are an ORDERED profile across k random-walk
-    steps (return probability at step 1, 2, ..., k) with no eigenvalue-like
-    channel to pair with them. Reusing the eigenvector pipeline for RWSE means
-    feeding a zero-constant eigenvalue channel and then mean-pooling across
-    the step axis -- discarding exactly the step-order information that makes
-    RWSE informative. This class instead encodes the full k-dim RWSE vector
-    per node with a plain MLP, which sees all k steps jointly and preserves
-    their relative structure instead of averaging them away.
-    """
-    def __init__(self, net_params):
-        super().__init__()
-        from nets.load_net import gnn_model
-        from layers.mlp_readout_layer import MLPReadout
-        from ogb.graphproppred.mol_encoder import AtomEncoder, BondEncoder
-        from layers.graph_transformer_layer import GraphTransformerLayer
-
-        GT_hidden_dim = net_params["GT_hidden_dim"]
-        GT_out_dim = net_params["GT_out_dim"]
-        GT_n_heads = net_params["GT_n_heads"]
-        GT_layers = net_params["GT_layers"]
-        LPE_dim = net_params["LPE_dim"]  # RWSE step count, e.g. 20
-        full_graph = net_params["full_graph"]
-        gamma = net_params["gamma"]
-        dropout = net_params["dropout"]
-        in_feat_dropout = net_params["in_feat_dropout"]
-        layer_norm = net_params["layer_norm"]
-        batch_norm = net_params["batch_norm"]
-        residual = net_params["residual"]
-        n_classes = net_params.get("n_classes", 1)
-
-        self.readout = net_params["readout"]
-        self.in_feat_dropout = torch.nn.Dropout(in_feat_dropout)
-
-        self.embedding_h = AtomEncoder(emb_dim=GT_hidden_dim - LPE_dim)
-        self.embedding_e = BondEncoder(emb_dim=GT_hidden_dim)
-        self.embedding_e_fake = torch.nn.Embedding(1, GT_hidden_dim)
-
-        # Plain per-node MLP over the full ordered RWSE vector -- sees all
-        # steps jointly, no mean-pool-across-steps information loss.
-        self.rwse_encoder = torch.nn.Sequential(
-            torch.nn.Linear(LPE_dim, LPE_dim),
-            torch.nn.ReLU(),
-            torch.nn.Linear(LPE_dim, LPE_dim),
-        )
-
-        self.layers = torch.nn.ModuleList([
-            GraphTransformerLayer(gamma, GT_hidden_dim, GT_hidden_dim, GT_n_heads,
-                                  full_graph, dropout, layer_norm, batch_norm, residual)
-            for _ in range(GT_layers - 1)
-        ])
-        self.layers.append(
-            GraphTransformerLayer(gamma, GT_hidden_dim, GT_out_dim, GT_n_heads,
-                                  full_graph, dropout, layer_norm, batch_norm, residual)
-        )
-        self.MLP_layer = MLPReadout(GT_out_dim, n_classes)
-
-    def forward(self, g, h, e, rwse, _unused_eigvals=None):
-        import dgl
-        pe = self.rwse_encoder(rwse)  # [n, LPE_dim] -- steps stay joint, no pooling
-        h = torch.cat([self.embedding_h(h), pe], dim=-1)
-        h = self.in_feat_dropout(h)
-
-        if e is not None and e.shape[-1] > 0:
-            e = self.embedding_e(e)
-        else:
-            e = self.embedding_e_fake(torch.zeros(g.num_edges(), dtype=torch.long,
-                                                   device=h.device))
-        for conv in self.layers:
-            h, e = conv(g, h, e)
-
-        g.ndata["h"] = h
-        if self.readout == "sum":
-            hg = dgl.sum_nodes(g, "h")
-        elif self.readout == "max":
-            hg = dgl.max_nodes(g, "h")
-        else:
-            hg = dgl.mean_nodes(g, "h")
-        return torch.sigmoid(self.MLP_layer(hg))
 
 class _SAN_GRPE(torch.nn.Module):
     """SAN with GRPE (shortest-path distance bias in attention).
@@ -480,6 +522,16 @@ class _SAN_GRPE(torch.nn.Module):
         super().__init__()
         from nets.molhiv_graph_regression.SAN_NodeLPE import SAN_NodeLPE
         from layers.mlp_readout_layer import MLPReadout
+
+        # SAN_NodeLPE.__init__ unconditionally reads LPE_dim/LPE_n_heads/LPE_layers.
+        # PE_SPEC["grpe"] always supplies these today, so this is currently
+        # unreachable in practice -- but guard it anyway rather than relying on
+        # that staying true forever (see the real crash this exact pattern caused
+        # in _SAN_NodeLPE_Regression under --pe none on peptides-struct).
+        net_params = dict(net_params)
+        net_params.setdefault("LPE_dim", 16)
+        net_params.setdefault("LPE_n_heads", 4)
+        net_params.setdefault("LPE_layers", 2)
 
         # Build base SAN_NodeLPE model and replace attention layers
         self._base = SAN_NodeLPE(net_params)
@@ -513,38 +565,99 @@ class _SAN_NodeLPE_Regression(torch.nn.Module):
     to (0,1). Regression targets (peptides-struct: 11 molecular descriptors) are
     real-valued and unbounded. This class wraps SAN_NodeLPE and replaces the
     final activation with a plain linear output.
+
+    RWSE handling: peptides-struct's BASE_NET_PARAMS sets _variant="regression" at
+    the DATASET level, which build_san_net_params preserves over PE_SPEC's own
+    _variant -- meaning every PE (including rwse) routes through this one class,
+    unlike peptides-func where rwse gets its own _SAN_RWSE class. Without an
+    explicit branch here, --pe rwse would silently fall through to the same
+    eigenvector-shaped linear_A/PE_Transformer/mean-pool-across-steps path that
+    was diagnosed as destroying RWSE's step-order signal on peptides-func (see
+    _SAN_RWSE's docstring for the full diagnosis). net_params["pe"] (set by
+    build_san_net_params) is used here since net_params["LPE"]=="node" is shared
+    by lappe/rwse/grpe and can't disambiguate them on its own.
     """
     def __init__(self, net_params):
         super().__init__()
         from nets.molhiv_graph_regression.SAN_NodeLPE import SAN_NodeLPE
         from layers.mlp_readout_layer import MLPReadout
         n_classes = net_params.get("n_classes", 1)
+
+        # SAN_NodeLPE.__init__ unconditionally reads LPE_dim/LPE_n_heads/LPE_layers
+        # at construction time, even when LPE == "none" (it only checks the LPE
+        # flag later, inside forward). PE_SPEC["none"] intentionally omits these
+        # keys since they're meaningless without a PE, which crashes construction
+        # with KeyError: 'LPE_layers' the first time --pe none is actually run on
+        # peptides-struct (this path went untested until the hyperparameter sweep
+        # exercised it). Fill in harmless defaults so construction doesn't crash;
+        # they're never actually used when LPE == "none".
+        net_params = dict(net_params)
+        net_params.setdefault("LPE_dim", 16)
+        net_params.setdefault("LPE_n_heads", 4)
+        net_params.setdefault("LPE_layers", 2)
+
         self._base = SAN_NodeLPE(net_params)
         # Replace sigmoid MLP with linear regression head (no activation)
         self._base.MLP_layer = MLPReadout(net_params["GT_out_dim"], n_classes)
         self._n_classes = n_classes
+
+        self.is_rwse = net_params.get("pe") == "rwse"
+        self.lpe_dim = net_params["LPE_dim"]
+        if self.is_rwse:
+            LPE_dim = net_params["LPE_dim"]
+            # Same fix as _SAN_RWSE: plain per-node MLP over the full ordered
+            # RWSE vector, no mean-pool-across-steps.
+            self.rwse_encoder = torch.nn.Sequential(
+                torch.nn.Linear(LPE_dim, LPE_dim),
+                torch.nn.ReLU(),
+                torch.nn.Linear(LPE_dim, LPE_dim),
+            )
 
     @property
     def layers(self):
         """Expose _base.layers so enable_gradient_checkpointing can wrap them."""
         return self._base.layers
 
-    def forward(self, g, h, e, EigVecs, EigVals):
+    def forward(self, g, h, e, EigVecs=None, EigVals=None):
         import dgl
         # Replicate SAN_NodeLPE.forward but WITHOUT the final sigmoid
         base = self._base
         h = base.embedding_h(h)
         h = base.in_feat_dropout(h)
-        e = base.embedding_e(e)
-        # LPE
-        EigVecs_u = EigVecs.unsqueeze(-1)  # [n, k, 1]
-        pe_inp = torch.cat([EigVecs_u, EigVals], dim=-1)  # [n, k, 2]
-        empty_mask = (EigVecs == 0).all(dim=-1)  # [n]
-        pe_inp[empty_mask] = 0.0
-        pe_inp = pe_inp.transpose(0, 1)  # [k, n, 2]
-        pe = base.linear_A(pe_inp)       # [k, n, LPE_dim]
-        pe = base.PE_Transformer(pe)     # [k, n, LPE_dim]
-        pe = pe.transpose(0, 1).mean(dim=1)  # [n, LPE_dim]
+        # Upstream SAN_NodeLPE names this attribute embedding_e_real (confirmed
+        # via a checkpoint state_dict mismatch earlier in debugging), not
+        # embedding_e as this class originally assumed -- a pre-existing bug
+        # that predates all other fixes in this file. It went undetected until
+        # now because this was the first time ANY PE was actually run on
+        # peptides-struct (not specific to --pe none). getattr fallback kept
+        # in case upstream's naming differs across versions/checkouts.
+        e = (base.embedding_e_real(e) if hasattr(base, "embedding_e_real")
+             else base.embedding_e(e))
+
+        if self.is_rwse:
+            # EigVecs is actually the [n, 20] rwse tensor here (see _forward_pass's
+            # pe == "rwse" branch, which passes rwse features in the eigvecs slot).
+            # EigVals is a zero placeholder and is intentionally unused.
+            pe = self.rwse_encoder(EigVecs)  # [n, LPE_dim]
+        elif EigVecs is not None and EigVals is not None:
+            # LPE
+            EigVecs_u = EigVecs.unsqueeze(-1)  # [n, k, 1]
+            pe_inp = torch.cat([EigVecs_u, EigVals], dim=-1)  # [n, k, 2]
+            empty_mask = (EigVecs == 0).all(dim=-1)  # [n]
+            pe_inp[empty_mask] = 0.0
+            pe_inp = pe_inp.transpose(0, 1)  # [k, n, 2]
+            pe = base.linear_A(pe_inp)       # [k, n, LPE_dim]
+            pe = base.PE_Transformer(pe)     # [k, n, LPE_dim]
+            pe = pe.transpose(0, 1).mean(dim=1)  # [n, LPE_dim]
+        else:
+            # pe == "none": _forward_pass calls model(bg, h, e) with no PE args at
+            # all. The base SAN_NodeLPE was still constructed with embedding_h's
+            # output width fixed at (GT_hidden_dim - LPE_dim) -- see the setdefault
+            # fix in __init__ -- so a same-width PE slot must still be filled to
+            # keep h's concatenated width equal to GT_hidden_dim. A zero vector is
+            # the correct no-PE filler (equivalent to no positional information).
+            pe = torch.zeros(h.shape[0], self.lpe_dim, device=h.device, dtype=h.dtype)
+
         h = torch.cat([h, pe], dim=-1)
         # GT layers
         for conv in base.layers:
@@ -603,8 +716,20 @@ class _SAN_NodeClassification(torch.nn.Module):
         self.embedding_e = torch.nn.Linear(edge_feat_dim, GT_hidden_dim)
         self.embedding_e_fake = torch.nn.Embedding(1, GT_hidden_dim)
 
-        # LPE components (only if not 'none')
-        if lpe != "none":
+        # RWSE gets its own encoder, same fix as _SAN_RWSE / _SAN_NodeLPE_Regression:
+        # a plain per-node MLP over the full ordered RWSE vector, instead of falling
+        # through to the eigenvector-shaped linear_A/PE_Transformer/mean-pool-across-
+        # steps path below (self.lpe == "node" is shared by lappe/rwse/grpe and can't
+        # tell them apart on its own -- net_params["pe"], set by build_san_net_params,
+        # is used here instead).
+        self.is_rwse = net_params.get("pe") == "rwse"
+        if self.is_rwse:
+            self.rwse_encoder = torch.nn.Sequential(
+                torch.nn.Linear(LPE_dim, LPE_dim), torch.nn.ReLU(),
+                torch.nn.Linear(LPE_dim, LPE_dim),
+            )
+        # LPE components (only if not 'none' and not rwse, which has its own path)
+        elif lpe != "none":
             LPE_n_heads = net_params["LPE_n_heads"]
             LPE_layers = net_params["LPE_layers"]
             if lpe == "signnet":
@@ -644,7 +769,12 @@ class _SAN_NodeClassification(torch.nn.Module):
                 torch.zeros(g.num_edges(), dtype=torch.long, device=h.device))
 
         # LPE if active
-        if self.lpe != "none" and EigVecs is not None:
+        if self.is_rwse and EigVecs is not None:
+            # EigVecs is actually the [n, 20] rwse tensor here (see _forward_pass's
+            # pe == "rwse" branch). EigVals is a zero placeholder, unused.
+            pe = self.rwse_encoder(EigVecs)  # [n, LPE_dim]
+            h = torch.cat([h, pe], dim=-1)
+        elif self.lpe != "none" and EigVecs is not None:
             if self.lpe == "signnet":
                 # Sign-invariant: phi(v) + phi(-v) per eigenvector
                 n, k = EigVecs.shape
@@ -724,8 +854,7 @@ PE_SPEC = {
     "lappe":   {"LPE": "node", "LPE_dim": 16, "LPE_n_heads": 4, "LPE_layers": 2},
     # RWSE: fed through SAN's LPE slot with LPE_dim=20 to match RWSE feature width.
     # EigVals set to zeros (RWSE has no eigenvalues). _forward_pass handles the swap.
-    "rwse":    {"LPE": "node", "LPE_dim": 20, "LPE_n_heads": 4, "LPE_layers": 2,
-            "_variant": "rwse"},
+    "rwse":    {"LPE": "node", "LPE_dim": 20, "LPE_n_heads": 4, "LPE_layers": 2},
     # SignNet: uses _SAN_SignNetLPE which applies phi(v)+phi(-v) instead of PE_Transformer
     "signnet": {"LPE": "node", "LPE_dim": 16, "LPE_n_heads": 4, "LPE_layers": 2,
                 "_variant": "signnet"},
@@ -759,18 +888,19 @@ def build_san_net_params(run_cfg) -> dict:
         base["_variant"] = dataset_variant
     base.update(pe_spec)
     base["seed"] = run_cfg.seed
+    # Explicit PE identity, separate from "LPE" (which is shared as "node" by
+    # lappe/rwse/grpe and can't disambiguate them). Dataset-variant classes
+    # (_SAN_NodeLPE_Regression, _SAN_NodeClassification) need this to give RWSE
+    # its own encoding branch instead of falling through to the eigenvector-
+    # shaped PE_Transformer path meant for lappe/grpe -- see _SAN_RWSE's
+    # docstring for why that path silently destroys RWSE's step-order signal.
+    base["pe"] = run_cfg.pe
     for key in ("GT_hidden_dim", "GT_out_dim"):
         if base[key] % base["GT_n_heads"] != 0:
             raise ValueError(
                 f"{key}={base[key]} not divisible by GT_n_heads={base['GT_n_heads']} "
                 f"for pe={run_cfg.pe!r} dataset={run_cfg.dataset!r}."
             )
-    if getattr(run_cfg, "gamma", None) is not None:
-        base["gamma"] = run_cfg.gamma
-    if getattr(run_cfg, "dropout", None) is not None:
-        base["dropout"] = run_cfg.dropout
-        base["in_feat_dropout"] = run_cfg.dropout
-
     return base
 
 
@@ -794,12 +924,6 @@ def build_san_train_params(run_cfg) -> dict:
         params["epochs"] = run_cfg.epochs
     if getattr(run_cfg, "smoke_test", False):
         params["epochs"] = 1
-    
-    if getattr(run_cfg, "lr", None) is not None:
-        params["init_lr"] = run_cfg.lr
-    if getattr(run_cfg, "weight_decay", None) is not None:
-        params["weight_decay"] = run_cfg.weight_decay
-    
     return params
 
 
@@ -1016,6 +1140,18 @@ def enable_gradient_checkpointing(model, use_reentrant: bool = False,
     making any future occurrence of it during an actual training step unambiguous
     (see SAN_DEBUG_CHECKPOINT_GRAD env var above for a targeted debug print if that
     warning ever reappears during training and needs to be chased down for real).
+
+    Also stores the ORIGINAL unwrapped forward as layer._probe_forward, for
+    make_san_model_fn's sensitivity probe to call directly. The probe needs
+    torch.autograd.grad() (not .backward()) to get per-source-node Jacobian blocks
+    without accumulating into every parameter's .grad -- but this PyTorch version's
+    torch.utils.checkpoint raises "Checkpointing is not compatible with .grad()"
+    the moment autograd.grad() is used anywhere in a graph that passed through a
+    checkpointed segment, even a call outside the checkpoint itself. Since the probe
+    doesn't need checkpointing's memory savings anyway (it processes one graph at a
+    time, not a full training batch), model_fn bypasses the checkpoint wrapper
+    entirely via this stored reference rather than trying to make checkpointing and
+    autograd.grad() coexist.
     """
     import inspect
     from torch.utils.checkpoint import checkpoint
@@ -1023,6 +1159,7 @@ def enable_gradient_checkpointing(model, use_reentrant: bool = False,
 
     for layer in model.layers:
         proxy = _CheckpointProxy(layer.forward, use_amp)
+        layer._probe_forward = proxy.fwd_fn
         if supports_reentrant:
             def checkpointed_forward(g, h, e, _p=proxy, _ur=use_reentrant):
                 _p.g = g
@@ -1104,14 +1241,15 @@ def san_train(run_cfg, san_dir: Optional[str] = None) -> dict:
     if n_params > 500_000:
         print(f"  WARNING: {n_params:,} params exceeds the 500k proposal budget")
 
-    train_loader, val_loader, test_loader = _build_loaders(run_cfg, net_params, train_params)
+    train_loader, val_loader, test_loader, class_weights, probe_dataset = _build_loaders(
+        run_cfg, net_params, train_params)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=train_params["init_lr"],
                                  weight_decay=train_params["weight_decay"])
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=train_params["lr_reduce_factor"],
         patience=train_params["lr_schedule_patience"], min_lr=train_params["min_lr"])
-    loss_fn = _loss_for(run_cfg.dataset)
+    loss_fn = _loss_for(run_cfg.dataset, class_weights=class_weights, device=device)
 
     # Resume from checkpoint if present (covers both OOM restarts and SLURM preemption)
     ckpt_path = _checkpoint_path(run_cfg)
@@ -1157,6 +1295,16 @@ def san_train(run_cfg, san_dir: Optional[str] = None) -> dict:
             loss.backward()
 
             if (i + 1) % accumulation_steps == 0 or (i + 1) == len(train_loader):
+                # Gradient clipping: caps the overall gradient norm before it's
+                # applied, preventing a single destructively large step. Added
+                # after observing pascalvoc-sp's --pe none --gamma 1e-5 sweep run
+                # freeze to a bit-identical output (val/test unchanged for 16
+                # straight epochs) starting from epoch 0 -- the classic signature
+                # of an early exploding-gradient step collapsing the model into a
+                # saturated/dead region it can't recover from. No-op for gradients
+                # already under max_norm, so this shouldn't change behavior for
+                # runs that weren't hitting this failure mode.
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
                 optimizer.zero_grad()
 
@@ -1217,6 +1365,11 @@ def san_train(run_cfg, san_dir: Optional[str] = None) -> dict:
         "num_params": n_params,
         "metric_name": run_cfg.metric_name,
         "metric_value": best_metric,
+        # Used by run_experiment.run_cell in place of loaders[-1].dataset for the
+        # sensitivity probe -- see _PEAttachedDataset's docstring for why SAN needs
+        # a separate probe-friendly dataset rather than reusing the training
+        # test_loader's dataset directly (which yields (data, pe_data) tuples).
+        "probe_dataset": probe_dataset,
     }
 
 
@@ -1342,6 +1495,43 @@ class _PECacheDataset:
         return data, pe_data
 
 
+class _PEAttachedDataset:
+    """Wraps a _PECacheDataset (or Subset thereof), returning single self-contained
+    Data objects with PE fields attached as attributes, instead of (data, pe_data)
+    tuples.
+
+    Exists ONLY for the sensitivity probe. run_experiment.sample_test_graphs and
+    run_probe are written generically across backbones and expect
+    `test_dataset[i]` to return one Data object carrying everything needed to
+    reconstruct the model's forward pass for that graph -- training's collate_fn
+    needs the tuple form instead, so this is a separate wrapper rather than a
+    change to _PECacheDataset itself, to avoid touching the training path at all.
+
+    Also attaches `_pe` (the active PE name) and `_full_graph` (net_params's
+    full_graph flag) onto each Data object. Unlike GraphGPS, which computes its
+    PE internally from raw x/edge_index inside the model's own encoder, SAN's PE
+    comes from an external cache keyed by graph index and split -- so
+    make_san_model_fn has no way to know which PE was active or how to rebuild
+    the DGL graph (dense vs sparse) without these two attributes.
+    """
+    def __init__(self, pe_cache_dataset, pe: str, full_graph: bool):
+        self._ds = pe_cache_dataset
+        self._pe = pe
+        self._full_graph = full_graph
+
+    def __len__(self):
+        return len(self._ds)
+
+    def __getitem__(self, idx):
+        data, pe_data = self._ds[idx]
+        data = data.clone()
+        for k, v in pe_data.items():
+            setattr(data, k, v)
+        data._pe = self._pe
+        data._full_graph = self._full_graph
+        return data
+
+
 def _build_loaders(run_cfg, net_params, train_params):
     """Build train/val/test DataLoaders with PE features loaded from cache per graph.
 
@@ -1367,6 +1557,7 @@ def _build_loaders(run_cfg, net_params, train_params):
     edge_budget = getattr(run_cfg, "edge_budget", None)
     use_edge_budget = bool(edge_budget) and net_params.get("full_graph", False)
     loaders = []
+    class_weights = None  # only set for pascalvoc-sp's train split, below
 
     for split in ("train", "val", "test"):
         base_ds = LRGBDataset(root=f"./raw_data/{pyg_name}", name=pyg_name, split=split)
@@ -1398,19 +1589,72 @@ def _build_loaders(run_cfg, net_params, train_params):
             bs = train_params["batch_size"] if split == "train" else 16
             loaders.append(DataLoader(ds, batch_size=bs, shuffle=shuffle,
                                       collate_fn=collate))
-    return loaders
+
+        if split == "test":
+            # Built from the SAME underlying (post max_nodes filtering) dataset the
+            # test_loader above uses, so the probe samples from exactly the graphs
+            # that were actually available at eval time -- not a separately
+            # constructed copy that could silently diverge (e.g. if max_nodes
+            # filtering were computed differently in two places).
+            probe_dataset = _PEAttachedDataset(
+                ds, pe=run_cfg.pe, full_graph=net_params["full_graph"])
+
+        if split == "train" and run_cfg.dataset == "pascalvoc-sp":
+            # PascalVOC-SP is heavily class-imbalanced (majority class ~71% of
+            # nodes; several classes under 1%), but CrossEntropyLoss without
+            # weighting treats every node equally -- the model gets little
+            # gradient signal to learn rare classes well, while macro-F1 (the
+            # eval metric) weights every class equally regardless of frequency.
+            # This computes inverse-frequency weights from the REAL, FULL
+            # training set label distribution (not just a diagnostic sample),
+            # aligned with whichever indices max_nodes filtering kept.
+            keep_idx = keep if max_nodes is not None else range(len(base_ds))
+            class_weights = _compute_pascalvoc_class_weights(
+                base_ds, keep_idx, net_params.get("n_classes", 21))
+
+    return loaders[0], loaders[1], loaders[2], class_weights, probe_dataset
+
+
+def _compute_pascalvoc_class_weights(base_ds, indices, n_classes):
+    """Inverse-frequency class weights for pascalvoc-sp's CrossEntropyLoss.
+
+    weight_c = (1/count_c) normalized so mean weight across classes is ~1 (keeps
+    the overall loss scale comparable to the unweighted case, rather than
+    shrinking/inflating it, which could otherwise interact confusingly with
+    --lr). Classes with zero occurrences in `indices` get a weight of 0 (can't
+    meaningfully weight what's never seen) rather than dividing by zero.
+    """
+    counts = torch.zeros(n_classes)
+    for i in indices:
+        y = base_ds[i].y.view(-1).long()
+        counts += torch.bincount(y, minlength=n_classes).float()
+
+    weights = torch.zeros(n_classes)
+    nonzero = counts > 0
+    weights[nonzero] = 1.0 / counts[nonzero]
+    if weights.sum() > 0:
+        weights = weights / weights.sum() * nonzero.sum().item()
+    return weights
 
 
 # ---------------------------------------------------------------------------
 # Loss and evaluation
 # ---------------------------------------------------------------------------
-def _loss_for(dataset: str):
+def _loss_for(dataset: str, class_weights=None, device=None):
     """peptides-func uses BCELoss (not BCEWithLogitsLoss) because SAN_NodeLPE.forward
     already applies sigmoid internally -- applying it again would be wrong.
+
+    pascalvoc-sp: class_weights (from _compute_pascalvoc_class_weights, inverse-
+    frequency, computed over the real training set) are applied to counter the
+    severe class imbalance (majority class ~71% of nodes) -- without weighting,
+    CrossEntropyLoss gives little gradient signal for rare classes, while the
+    eval metric (macro-F1) weights every class equally regardless of frequency.
     """
     if dataset == "peptides-func":   return torch.nn.BCELoss()
     if dataset == "peptides-struct": return torch.nn.L1Loss()
-    if dataset == "pascalvoc-sp":    return torch.nn.CrossEntropyLoss()
+    if dataset == "pascalvoc-sp":
+        weight = class_weights.to(device) if class_weights is not None else None
+        return torch.nn.CrossEntropyLoss(weight=weight)
     raise ValueError(dataset)
 
 
@@ -1443,11 +1687,175 @@ def _evaluate(model, loader, device, run_cfg, loss_fn):
 
 
 # ---------------------------------------------------------------------------
-# Jacobian probe wrapper -- STUB
+# Jacobian probe wrapper
 # ---------------------------------------------------------------------------
 def make_san_model_fn(model, data, device=None):
-    """Not yet wired. run_experiment.PROBE_WIRED_BACKBONES does not include 'san'."""
-    raise NotImplementedError(
-        "The Jacobian sensitivity probe is not yet wired for SAN. "
-        "Training is real; sensitivity curves will be empty in results."
-    )
+    """Wrap a trained SAN model for sensitivity.compute_sensitivity_curve.
+
+    Mirrors graphgps_backend.make_gps_model_fn's contract exactly:
+      model_fn(x)  runs SAN's GraphTransformerLayer stack (self.layers) on node
+                   representations `x`, returning final-layer NODE embeddings
+                   [n, GT_out_dim] -- not pooled, not passed through
+                   MLP_layer/readout.
+      probe_data   a stand-in with `.x` = h^(0) (embedding_h(feat) concatenated
+                   with the PE-derived positional channels, detached),
+                   `.edge_index`, `.num_nodes`.
+      meta         {"dim_inner": <width>, "num_nodes": ...}.
+
+    SAME REASONING AS GraphGPS for why h^(0) rather than raw features: LRGB node
+    features are integer atom-type indices consumed by an embedding lookup, so
+    d h / d x is undefined for a discrete index -- there is no derivative to
+    take at the raw input. The probe therefore differentiates from the encoder's
+    OUTPUT, exactly as graphgps_backend.make_gps_model_fn does.
+
+    THE n_shared_feats CONTRACT, AND WHY SAN HAS NO SHRINKING-CONTENT PROBLEM:
+    embedding_h's output width is (GT_hidden_dim - LPE_dim) when a PE is active
+    (0 when pe=='none'), and the concatenated PE vector is exactly LPE_dim wide
+    -- so h^(0)'s total width is ALWAYS GT_hidden_dim, algebraically, regardless
+    of which PE is active. Unlike GraphGPS (see that module's docstring), SAN
+    does not need a choice between "content-only" and "dim_inner" widths: since
+    BASE_NET_PARAMS holds GT_hidden_dim constant across all 5 PE variants for a
+    given dataset, meta["dim_inner"] (== h0.shape[1] == GT_hidden_dim) is
+    trivially identical across variants, so sensitivity.assert_shared_width will
+    pass without needing any judgment call about which width to report.
+
+    REQUIRES `data` from _PEAttachedDataset (san_train's "probe_dataset"), which
+    attaches `_pe` and `_full_graph` onto each Data object. Unlike GraphGPS,
+    which computes its PE internally from raw x/edge_index inside the model's
+    own encoder (a known limitation disclosed in graphgps_backend's docstring),
+    SAN's PE comes from an EXTERNAL cache keyed by graph index and split, so
+    this function has no way to reconstruct the model's forward pass for a
+    given graph without knowing which PE was active and whether full_graph
+    densification applies -- hence the two attributes, rather than inferring
+    them from `data` alone.
+
+    CHECKPOINTING NOTE: for full_graph=True datasets, self.layers[i].forward is
+    permanently monkey-patched by enable_gradient_checkpointing. Since the probe
+    runs with torch.is_grad_enabled()==True (autograd.grad calls require it),
+    checkpointing WILL engage here (recomputing each layer's activations during
+    backward) -- this is functionally correct (checkpoint is differentiable)
+    but doubles the compute cost per probed layer. Expected and acceptable
+    given the probe already subsamples (num_target_nodes, chunk_size); not a
+    bug, just a cost worth knowing about if probing is slower than training
+    would suggest.
+
+    NOT YET VALIDATED against a real GPU run -- unlike every other fix in this
+    file, this has not been through a smoke-test/crash/fix cycle. The class-
+    specific attribute names (embedding_e vs embedding_e_real, whether a
+    wrapper class exposes `_base` or its own attributes directly) were inferred
+    from reading the five model classes' __init__/forward methods and the one
+    real state_dict mismatch encountered earlier (embedding_e_real), not
+    confirmed by an actual run. Expect at least one debugging round here,
+    consistent with how every other backend integration in this project went;
+    the getattr/hasattr fallbacks below are a best-effort guard against the
+    naming inconsistencies already known to exist across the 5 classes, not a
+    guarantee they cover every case.
+    """
+    import types
+
+    model.eval()
+    device = device or next(model.parameters()).device
+
+    pe = getattr(data, "_pe", None)
+    full_graph = getattr(data, "_full_graph", None)
+    if pe is None or full_graph is None:
+        raise RuntimeError(
+            "data is missing _pe/_full_graph attributes -- make_san_model_fn requires a "
+            "Data object from san_backend._PEAttachedDataset (san_train's "
+            "'probe_dataset'), not a bare PyG Data object. Check that "
+            "run_experiment.run_cell uses train_out.get('probe_dataset', ...) rather than "
+            "loaders[-1].dataset for backbone == 'san'."
+        )
+
+    # Reassemble this one graph's PE dict exactly as _load_pe_cache produced it, so
+    # _pyg_to_dgl builds the identical DGL graph san_train used (same 'real'-edge
+    # tagging, same EigVecs/EigVals/rwse/spd placement).
+    pe_data = {}
+    for key in ("EigVecs", "EigVals", "rwse", "spd"):
+        if hasattr(data, key):
+            pe_data[key] = getattr(data, key)
+
+    g = _pyg_to_dgl(data, full_graph=full_graph, pe_data=pe_data).to(device)
+    feat = g.ndata["feat"]
+    e_raw = g.edata.get("feat", None)
+
+    # _SAN_GRPE and _SAN_NodeLPE_Regression wrap an upstream SAN_NodeLPE instance in
+    # `_base`; every other class (including upstream's own SAN/SAN_NodeLPE, used
+    # directly for pe=='none'/'lappe') exposes embedding_h/embedding_e etc. on itself.
+    base = getattr(model, "_base", model)
+
+    with torch.no_grad():
+        h_content = base.embedding_h(feat.float() if feat.dtype.is_floating_point
+                                      else feat)
+        if hasattr(base, "in_feat_dropout"):
+            h_content = base.in_feat_dropout(h_content)
+
+        # Edge embedding: naming is inconsistent across the 5 classes (see the
+        # embedding_e_real vs embedding_e bug found earlier in _SAN_NodeLPE_Regression)
+        # -- try the plausible names in order rather than assuming one.
+        if e_raw is not None and e_raw.shape[-1] > 0:
+            if hasattr(base, "embedding_e"):
+                e0 = base.embedding_e(e_raw)
+            elif hasattr(base, "embedding_e_real"):
+                e0 = base.embedding_e_real(e_raw)
+            else:
+                raise AttributeError(
+                    f"{type(base).__name__} has neither embedding_e nor "
+                    "embedding_e_real -- add its actual attribute name here."
+                )
+        elif hasattr(base, "embedding_e_fake"):
+            e0 = base.embedding_e_fake(
+                torch.zeros(g.num_edges(), dtype=torch.long, device=device))
+        else:
+            raise AttributeError(f"{type(base).__name__} has no embedding_e_fake "
+                                  "for the empty-edge-feature case.")
+
+        # PE channels, computed the same way each class's own forward() does, then
+        # concatenated onto h_content -- together these form h^(0).
+        if pe == "rwse":
+            rwse_enc = getattr(model, "rwse_encoder", None) or getattr(base, "rwse_encoder")
+            pe_vec = rwse_enc(g.ndata["rwse"])
+        elif pe == "signnet":
+            phi = getattr(model, "signnet_phi", None) or getattr(base, "signnet_phi")
+            EigVecs = g.ndata["EigVecs"]
+            n, k = EigVecs.shape
+            v = EigVecs.view(n * k, 1)
+            pe_vec = (phi(v) + phi(-v)).view(n, k, -1).mean(dim=1)
+        elif pe == "none":
+            pe_vec = None
+        else:  # lappe, grpe: eigenvector path through linear_A + PE_Transformer
+            EigVecs, EigVals = g.ndata["EigVecs"], g.ndata["EigVals"]
+            EigVecs_u = EigVecs.unsqueeze(-1)
+            pe_inp = torch.cat([EigVecs_u, EigVals], dim=-1)
+            empty_mask = (EigVecs == 0).all(dim=-1)
+            pe_inp[empty_mask] = 0.0
+            pe_inp = pe_inp.transpose(0, 1)
+            pe_vec = base.PE_Transformer(base.linear_A(pe_inp)).transpose(0, 1).mean(dim=1)
+
+        h0 = torch.cat([h_content, pe_vec], dim=-1) if pe_vec is not None else h_content
+
+    h0 = h0.detach().clone()
+    e0 = e0.detach().clone()
+    layers = model.layers  # direct attribute, or via @property on wrapper classes
+
+    def model_fn(x):
+        h, e = x, e0
+        for conv in layers:
+            # Bypass gradient checkpointing entirely: torch.utils.checkpoint on
+            # this PyTorch version raises "Checkpointing is not compatible with
+            # .grad()" the moment sensitivity.py's torch.autograd.grad() calls
+            # touch a graph that passed through a checkpointed segment. The probe
+            # doesn't need checkpointing's memory savings (one graph at a time,
+            # not a full training batch), so call the ORIGINAL unwrapped forward
+            # (stored as _probe_forward by enable_gradient_checkpointing) when
+            # present; layers that were never checkpointed (pascalvoc-sp,
+            # full_graph=False) simply don't have this attribute, so fall back to
+            # calling the layer normally.
+            fwd = getattr(conv, "_probe_forward", conv)
+            h, e = fwd(g, h, e)
+        return h
+
+    probe_data = types.SimpleNamespace(
+        x=h0, edge_index=data.edge_index.to(device), num_nodes=int(data.num_nodes))
+    meta = {"dim_inner": h0.shape[1], "num_nodes": int(data.num_nodes)}
+    return model_fn, probe_data, meta

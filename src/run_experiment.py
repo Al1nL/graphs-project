@@ -81,7 +81,7 @@ TASK_METRIC = {
 # as an explicit set rather than a try/except around make_model_fn, so a backbone that is
 # wired for training but NOT yet for the probe (see san_train once implemented) can still
 # report a real task metric while sensitivity_curve honestly stays empty.
-PROBE_WIRED_BACKBONES = {"gps"}
+PROBE_WIRED_BACKBONES = {"gps", "san"}
 
 
 def build_config(backbone: str, pe: str, dataset: str, cache_dir: str) -> dict:
@@ -256,7 +256,7 @@ def run_cell(run_cfg: RunConfig) -> dict:
 
     if run_cfg.backbone in PROBE_WIRED_BACKBONES:
         loaders = train_out["loaders"]
-        test_dataset = loaders[-1].dataset  # GraphGym's create_loader(): [train, val, test]
+        test_dataset = train_out.get("probe_dataset", loaders[-1].dataset)
         probe_out = run_probe(train_out["model"], run_cfg.backbone, test_dataset, run_cfg)
         result["n_shared_feats"] = probe_out["n_shared_feats_used"]
         result["n_shared_feats_note"] = probe_out["n_shared_feats_note"]

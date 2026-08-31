@@ -125,7 +125,7 @@ def _frobenius_per_source(h_v, x, n_shared_feats, chunk_size, batched_ok):
                 (jac,) = torch.autograd.grad(
                     h_v, x, grad_outputs=chunk, is_grads_batched=True, retain_graph=True
                 )
-            except (RuntimeError, NotImplementedError) as exc:
+            except (RuntimeError, NotImplementedError, TypeError) as exc:
                 # is_grads_batched runs under vmap; an op in this backbone may lack a
                 # batching rule. Fall back to a plain loop -- same number, less speed.
                 warnings.warn(
