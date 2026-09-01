@@ -106,9 +106,18 @@ OUT="$CACHE_ROOT/$DATASET"
 
 # The cache build needs torch, torch_geometric, scipy and networkx -- all present in the
 # GraphGPS env, which is why it is reused here rather than adding a fourth env for one
-# script. Nothing GPU-specific is touched.
+# script. Nothing GPU-specific is touched. Override with --export=CONDA_ENV=..., which
+# takes a name or a full path prefix (see run_grid.slurm for why the path form matters).
 source "$(conda info --base)/etc/profile.d/conda.sh"
-conda activate graphgps_env
+CONDA_ENV="${CONDA_ENV:-graphgps_env}"
+conda activate "$CONDA_ENV" || {
+  echo "ERROR: conda activate '$CONDA_ENV' failed. If the env lives outside your" >&2
+  echo "envs_dirs (e.g. on netapp because of the home quota), pass the full prefix:" >&2
+  echo "  sbatch --array=0-2 --export=ALL,CONDA_ENV=/path/to/envs/graphgps_env $0" >&2
+  exit 1
+}
+[ -n "${CONDA_PREFIX:-}" ] || { echo "ERROR: CONDA_PREFIX unset after activate" >&2; exit 1; }
+echo "env: $CONDA_PREFIX"
 
 # Refuse to overwrite a COMPLETE cache. A finished build has a manifest; a crashed one does
 # not, and re-running over that is exactly what you want. Silently rebuilding a good cache

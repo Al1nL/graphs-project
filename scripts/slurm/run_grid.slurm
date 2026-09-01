@@ -106,15 +106,47 @@ echo "node=$(hostname)  gpu=${CUDA_VISIBLE_DEVICES:-unset}  started=$(date -Is)"
 
 # ---------------------------------------------------------------------------
 # Environment: GraphGPS and SAN need DIFFERENT conda envs (see README "Environment
-# setup" -- their PyG/DGL/CUDA pins conflict). Pick the right one for this array task.
-# Adjust the env names below if yours differ from the README's suggested names.
+# setup" -- their PyG/DGL/CUDA pins conflict). One array runs ONE backbone, so one env.
+#
+# CONDA_ENV overrides the per-backbone default and accepts either a NAME or a full PATH
+# prefix, because `conda activate` takes both. The path form is the one that matters here:
+# the CS cluster warns that home quotas cannot hold an env ("do NOT install in your
+# HOME-DIR as you don't have enough quota for it"), so a pytorch+CUDA env usually lives on
+# netapp/scratch and was created with `conda env create -p /path/to/envs/graphgps_env`.
+# A -p env is NOT findable by name unless its parent is registered in envs_dirs, so
+# passing the prefix explicitly avoids depending on ~/.condarc state that the job record
+# does not capture:
+#
+#   sbatch --export=ALL,BACKBONE=gps,CONDA_ENV=/path/to/envs/graphgps_env,... run_grid.slurm
+#   scripts/slurm/submit_grid.sh gps 32 --conda-env=/path/to/envs/graphgps_env
 # ---------------------------------------------------------------------------
 source "$(conda info --base)/etc/profile.d/conda.sh"
-if [ "$BACKBONE" = "gps" ]; then
-  conda activate graphgps_env
-else
-  conda activate san_env
+
+if [ -z "${CONDA_ENV:-}" ]; then
+  if [ "$BACKBONE" = "gps" ]; then CONDA_ENV="graphgps_env"; else CONDA_ENV="san_env"; fi
 fi
+
+# `set -e` does not catch this: conda activate is a shell function, and on a missing env it
+# prints "EnvironmentNameNotFound" and returns non-zero WITHOUT terminating the script under
+# every conda version. Unchecked, the cell would then run against whatever python is on
+# PATH -- most likely the base env, which has no torch -- and fail later with a confusing
+# ImportError instead of the real cause. Check explicitly.
+conda activate "$CONDA_ENV" || {
+  echo "ERROR: conda activate '$CONDA_ENV' failed." >&2
+  echo "  If this is a name, it must exist in one of: $(conda config --show envs_dirs 2>/dev/null | tr '\n' ' ')" >&2
+  echo "  If the env lives outside those (e.g. on netapp because of the home quota), pass" >&2
+  echo "  the full prefix instead: --export=ALL,CONDA_ENV=/path/to/envs/<name>,..." >&2
+  exit 1
+}
+if [ -z "${CONDA_PREFIX:-}" ]; then
+  echo "ERROR: conda activate '$CONDA_ENV' reported success but CONDA_PREFIX is unset." >&2
+  exit 1
+fi
+
+# Logged so the job record shows which interpreter actually ran the cell. Provenance:
+# "which env produced this number" is otherwise unanswerable from results/*.json alone.
+echo "env: $CONDA_PREFIX"
+echo "python: $(command -v python)"
 
 # GRPE is not yet a drop-in on either backbone (see README "Implementation status") --
 # skip it here rather than let it fail loudly 9 times across the array (3 datasets x 3
