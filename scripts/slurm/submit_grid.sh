@@ -41,6 +41,8 @@ NUM_PROBE_GRAPHS=""
 PE_LIST=""                    # non-empty -> filters run_grid.slurm's PES array client-side
 DRY_RUN=0
 ACCOUNT="gpu-students"
+CONDA_BASE=""                 # conda installation root; empty -> job asks `conda info
+                              # --base`, which only works if conda is on PATH there
 CONDA_ENV=""                  # empty -> run_grid.slurm picks per backbone
                               # (graphgps_env / san_env). Accepts a NAME or a full
                               # PATH prefix; use the path when the env lives off
@@ -51,6 +53,7 @@ while [ $# -gt 0 ]; do
     --partition=*) PARTITION="${1#*=}" ;;
     --account=*) ACCOUNT="${1#*=}" ;;
     --conda-env=*) CONDA_ENV="${1#*=}" ;;
+    --conda-base=*) CONDA_BASE="${1#*=}" ;;
     --throttle=*) THROTTLE="${1#*=}" ;;
     --array-range=*) ARRAY_RANGE="${1#*=}" ;;
     --constraint=*) CONSTRAINT="${1#*=}" ;;
@@ -120,6 +123,7 @@ fi
 EXPORT_VARS="BACKBONE=$BACKBONE,NUM_TARGET_NODES=$NUM_TARGET_NODES,RESULTS_DIR=$RESULTS_DIR"
 [ -n "$NUM_PROBE_GRAPHS" ] && EXPORT_VARS="$EXPORT_VARS,NUM_PROBE_GRAPHS=$NUM_PROBE_GRAPHS"
 [ -n "$CONDA_ENV" ] && EXPORT_VARS="$EXPORT_VARS,CONDA_ENV=$CONDA_ENV"
+[ -n "$CONDA_BASE" ] && EXPORT_VARS="$EXPORT_VARS,CONDA_BASE=$CONDA_BASE"
 
 SBATCH_ARGS=(
   --partition="$PARTITION"
@@ -134,6 +138,7 @@ CMD=(sbatch "${SBATCH_ARGS[@]}" scripts/slurm/run_grid.slurm)
 echo "Grid: backbone=$BACKBONE  T=$NUM_TARGET_NODES  partition=$PARTITION"
 echo "      account=$ACCOUNT  array=${ARRAY_RANGE}%${THROTTLE}  constraint=${CONSTRAINT:-<any>}"
 echo "      env=${CONDA_ENV:-<per-backbone default: graphgps_env/san_env>}"
+echo "      conda_base=${CONDA_BASE:-<from PATH>}"
 echo "Command: ${CMD[*]}"
 
 if [ "$DRY_RUN" = "1" ]; then

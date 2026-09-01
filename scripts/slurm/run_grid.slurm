@@ -120,7 +120,24 @@ echo "node=$(hostname)  gpu=${CUDA_VISIBLE_DEVICES:-unset}  started=$(date -Is)"
 #   sbatch --export=ALL,BACKBONE=gps,CONDA_ENV=/path/to/envs/graphgps_env,... run_grid.slurm
 #   scripts/slurm/submit_grid.sh gps 32 --conda-env=/path/to/envs/graphgps_env
 # ---------------------------------------------------------------------------
-source "$(conda info --base)/etc/profile.d/conda.sh"
+# Locating conda: `conda` is NOT on PATH on this cluster by default (`which conda` ->
+# "Command not found"), and a batch shell does not source your login rc, so
+# `conda info --base` can fail here even when conda works in an interactive session.
+# CONDA_BASE names the installation root explicitly; it falls back to asking conda only
+# when conda happens to be on PATH.
+CONDA_BASE="${CONDA_BASE:-}"
+if [ -z "$CONDA_BASE" ] && command -v conda >/dev/null 2>&1; then
+  CONDA_BASE="$(conda info --base 2>/dev/null || true)"
+fi
+if [ -z "$CONDA_BASE" ] || [ ! -f "$CONDA_BASE/etc/profile.d/conda.sh" ]; then
+  echo "ERROR: no conda installation found." >&2
+  echo "  conda is not on PATH here and CONDA_BASE is unset or wrong." >&2
+  echo "  Pass the installation root, e.g.:" >&2
+  echo "    --export=ALL,CONDA_BASE=/home/yandex/<course>/<user>/miniforge3,..." >&2
+  echo "  (CONDA_BASE=$CONDA_BASE)" >&2
+  exit 1
+fi
+source "$CONDA_BASE/etc/profile.d/conda.sh"
 
 if [ -z "${CONDA_ENV:-}" ]; then
   if [ "$BACKBONE" = "gps" ]; then CONDA_ENV="graphgps_env"; else CONDA_ENV="san_env"; fi
