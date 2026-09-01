@@ -60,10 +60,18 @@
 
 #SBATCH --job-name=pe-cache
 #SBATCH --account=gpu-students
-# cpu-killable: the cluster's CPU-only partition (5-day limit). Correct queue for this job
-# -- it asks for no GPU, so it does not compete for cards and does not consume a GPU
-# partition's per-user job cap. Both directives are overridable on the sbatch command line.
-#SBATCH --partition=cpu-killable
+# studentkillable, NOT cpu-killable. The CS Slurm guide advertises cpu-killable (CPU-only,
+# 5-day) and it is the better queue for a job that asks for no GPU -- but entitlement is
+# per account, and a student account may hold exactly one pairing:
+#
+#     $ sacctmgr -P show assoc user=$USER format=account,partition,qos
+#     Account|Partition|QOS
+#     gpu-students|studentkillable|normal
+#
+# Anything else fails at submission with "Invalid account or account/partition combination
+# specified". Check your own associations before changing this; if you do have cpu-killable,
+# prefer it, since this job requests no GPU and should not sit in a GPU queue.
+#SBATCH --partition=studentkillable
 #SBATCH --output=slurm_logs/%x_%A_%a.out
 #SBATCH --error=slurm_logs/%x_%A_%a.err
 #SBATCH --nodes=1

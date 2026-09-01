@@ -25,8 +25,14 @@ shift 2
 # Defaults. See scripts/slurm/README.md for what each partition actually means on this
 # cluster and why studentbatch is the default here.
 # ---------------------------------------------------------------------------
-PARTITION="studentkillable"      # 3-day limit, batch jobs, capped at 6 PER USER -- this ONE
-                              # array submission counts as one of those six, not 45
+PARTITION="studentkillable"   # pre-emptible student partition. The comment here used to
+                              # describe studentbatch (3-day, capped at 6 jobs) while the
+                              # value said studentkillable -- two different partitions with
+                              # different limits. studentkillable is what a gpu-students
+                              # association actually grants; verify yours with
+                              # `sacctmgr -P show assoc user=$USER format=account,partition,qos`
+                              # and check its wall limit with `sinfo -p studentkillable -o "%P %l"`
+                              # before trusting run_grid.slurm's --time.
 THROTTLE=4                   # max concurrent array tasks (`--array=0-44%THROTTLE`)
 ARRAY_RANGE="0-44"            # override with --array-range if running a partial grid
 CONSTRAINT=""                 # e.g. "a5000|a6000|l40s" -- empty = any GPU node
