@@ -1,8 +1,14 @@
 # Running the grid on the TAU CS cluster
 
-Two files: `run_grid.slurm` (the actual array job Slurm executes) and `submit_grid.sh` (a
-convenience wrapper around `sbatch` with TAU-appropriate defaults). You almost always want
-`submit_grid.sh`; read `run_grid.slurm` if you need to change what a cell actually runs.
+Three files: `run_grid.slurm` (the actual array job Slurm executes), `submit_grid.sh` (a
+convenience wrapper around `sbatch` with TAU-appropriate defaults), and
+`build_cache.slurm` (rebuilds the PE cache, which has to exist before any grid runs). You
+almost always want `submit_grid.sh`; read `run_grid.slurm` if you need to change what a
+cell actually runs.
+
+`build_cache.slurm` is the one people miss. The ~5 GB PE cache is gitignored, so a fresh
+clone on the cluster does not have it, and **every** backbone reads it — GraphGPS included,
+since `backends/graphgps_pe_cache.py` landed. It is CPU-only work and requests no GPU.
 
 ## Why one job array, not 45 `sbatch` calls
 
@@ -27,20 +33,27 @@ ssh <you>@slurm-client.cs.tau.ac.il
 # 2. from the repo root, with your conda envs already set up (README "Environment setup")
 cd /path/to/graphs-project
 
-# 3. calibrate T once per backbone (NOT per PE/dataset -- it's a property of the probe and
+# 3. build the PE cache. It is gitignored, so a fresh clone does NOT have it, and every
+#    backbone reads it -- including GraphGPS since backends/graphgps_pe_cache.py landed.
+#    Three datasets, one array task each, CPU-only, ~45 min for the slowest (VOC).
+sbatch --partition=studentbatch --array=0-2 \
+       --export=RAW_DIR=/vol/scratch/$USER/raw_data \
+       scripts/slurm/build_cache.slurm
+
+# 4. calibrate T once per backbone (NOT per PE/dataset -- it's a property of the probe and
 #    the graph regime; see calibration.py's own docstring). This needs a trained checkpoint,
 #    so do at least one manual training run first, or use --demo to sanity-check the
 #    calibration pipeline itself while a real checkpoint isn't ready yet:
 python scripts/calibrate_target_nodes.py --backbone gps --pe rwse --dataset peptides-func \
     --checkpoint results/raw/gps_rwse_peptides-func/0/ckpt/best.pt
 
-# 4. dry-run the submission (prints the sbatch command, submits nothing)
+# 5. dry-run the submission (prints the sbatch command, submits nothing)
 scripts/slurm/submit_grid.sh gps 32 --dry-run
 
-# 5. submit for real
+# 6. submit for real
 scripts/slurm/submit_grid.sh gps 32
 
-# 6. watch it
+# 7. watch it
 squeue --me
 tail -f slurm_logs/pe-grid_<jobid>_<taskid>.out
 ```

@@ -353,6 +353,50 @@ def test_process_dataset_writes_a_readable_cache():
         shutil.rmtree(out, ignore_errors=True)
 
 
+def test_raw_dir_is_passed_through_to_the_dataset_loader():
+    """--raw-dir exists so a cluster can keep ~5 GB of LRGB downloads off a quota-limited
+    home directory (scripts/slurm/build_cache.slurm passes it). An option that silently
+    ignored its value would send the download to the wrong filesystem and fail a job
+    hours in, so check the path actually reaches LRGBDataset's root.
+    """
+    import compute_pe
+
+    class _FakeData:
+        def __init__(self, n):
+            und = [(i, i + 1) for i in range(n - 1)]
+            self.edge_index = __import__("torch").tensor(
+                und + [(b, a) for a, b in und]).t()
+            self.num_nodes = n
+
+    seen_roots = []
+    real_loader = compute_pe.LRGBDataset
+
+    def _spy(root, name, split):
+        seen_roots.append(root)
+        return [_FakeData(6)]
+
+    compute_pe.LRGBDataset = _spy
+    out = tempfile.mkdtemp()
+    try:
+        compute_pe.process_dataset("peptides-func", out, raw_dir="/scratch/somewhere")
+        assert seen_roots, "the loader was never called"
+        for root in seen_roots:
+            assert root.replace("\\", "/").startswith("/scratch/somewhere"), (
+                f"--raw-dir was ignored; loader got root={root!r}")
+
+        # And the default still points at the repo-relative path it always did.
+        seen_roots.clear()
+        out2 = tempfile.mkdtemp()
+        try:
+            compute_pe.process_dataset("peptides-func", out2)
+            assert all("raw_data" in r for r in seen_roots), seen_roots
+        finally:
+            shutil.rmtree(out2, ignore_errors=True)
+    finally:
+        compute_pe.LRGBDataset = real_loader
+        shutil.rmtree(out, ignore_errors=True)
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

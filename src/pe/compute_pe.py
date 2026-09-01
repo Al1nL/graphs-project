@@ -150,7 +150,7 @@ def _graph_records(ds):
         yield lap_pe.numpy(), lap_eigvals.numpy(), rwse.numpy(), spd
 
 
-def process_dataset(name, out_dir):
+def process_dataset(name, out_dir, raw_dir="./raw_data"):
     """Precompute every PE for one dataset, once, streaming to disk.
 
     All five variants are served from this single pass: LapPE and SignNet-PE from the
@@ -171,7 +171,10 @@ def process_dataset(name, out_dir):
 
     writer = PECacheWriter(out_dir, name, K_LAP, K_RWSE)
     for split in SPLITS:
-        ds = LRGBDataset(root=f"./raw_data/{pyg_name}", name=pyg_name, split=split)
+        # LRGBDataset downloads here on first use. `raw_dir` is a parameter rather than a
+        # hardcoded "./raw_data" because on a cluster the ~5 GB of raw LRGB downloads
+        # usually cannot live in a quota-limited home directory -- point it at scratch.
+        ds = LRGBDataset(root=os.path.join(raw_dir, pyg_name), name=pyg_name, split=split)
         writer.write_split(split, _graph_records(ds), total=len(ds))
     return writer.finalize()
 
@@ -207,5 +210,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", required=True, choices=list(DATASET_NAME_MAP.keys()))
     parser.add_argument("--out", required=True)
+    parser.add_argument("--raw-dir", default="./raw_data",
+                        help="where LRGBDataset downloads/reads the raw data (default "
+                             "./raw_data, relative to CWD). Point this at scratch on a "
+                             "cluster -- the three datasets total ~5 GB.")
     args = parser.parse_args()
-    process_dataset(args.dataset, args.out)
+    process_dataset(args.dataset, args.out, raw_dir=args.raw_dir)
