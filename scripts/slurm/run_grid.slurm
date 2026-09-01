@@ -43,7 +43,15 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32000
 #SBATCH --gpus=1
-#SBATCH --time=4320
+# 1440 min = 24 h, the hard cap on studentkillable:
+#     $ sinfo -p studentkillable -o "%P %l"
+#     PARTITION       TIMELIMIT
+#     studentkillable 1-00:00:00
+# This used to request 4320 (3 days), which that partition rejects outright -- the value
+# was copied from studentbatch's 3-day limit. Raise it only if you submit to a partition
+# your account can actually use AND whose limit is higher; check both, they are separate
+# questions (see submit_grid.sh's PARTITION comment).
+#SBATCH --time=1440
 #SBATCH --signal=USR1@120
 # --requeue: cells on a killable partition can be pre-empted; this asks Slurm to requeue
 # rather than mark the array task failed. A pre-empted cell just re-trains from scratch

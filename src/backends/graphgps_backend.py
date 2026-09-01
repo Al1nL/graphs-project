@@ -183,6 +183,27 @@ def build_graphgym_cfg(run_cfg, graphgps_dir: str):
         cfg.optim.max_epoch = run_cfg.epochs
     cfg.train.mode = "custom"          # GraphGPS's own loop; 'standard' needs lightning
     cfg.wandb.use = False              # the launcher owns logging
+
+    # --- surviving a pre-emptible partition with a wall shorter than a training run ------
+    # GraphGPS's custom_train already supports resume (`start_epoch = load_ckpt(...)` then
+    # `for cur_epoch in range(start_epoch, max_epoch)`), but GraphGym defaults auto_resume
+    # to False, so nothing here used it. On studentkillable -- 24 h hard cap, pre-emptible,
+    # and the only partition a gpu-students association grants -- that combination is
+    # unworkable: run_grid.slurm sets --requeue, but a requeued cell without resume simply
+    # restarts from epoch 0 and can be pre-empted again, so a cell that needs longer than
+    # the wall never finishes no matter how many times it is requeued.
+    cfg.train.auto_resume = True
+    cfg.train.enable_ckpt = True
+    # The reference YAMLs set ckpt_period 100, i.e. two checkpoints across a 200-epoch run,
+    # which is fine for archiving and useless for resume -- an interruption at epoch 99
+    # would lose 99 epochs. 10 caps the loss at 10 epochs for a model small enough that
+    # 20-30 checkpoints is tens of MB, not a quota problem.
+    cfg.train.ckpt_period = 10
+
+    # NOTE the consequence for re-runs: with auto_resume on, re-running a cell whose
+    # checkpoint has reached max_epoch does NOT retrain -- custom_train logs "Checkpoint
+    # found, Task already done" and skips to evaluation. That is what makes requeue work,
+    # but it also means a deliberate retrain needs cfg.out_dir cleared first.
     return cfg
 
 
