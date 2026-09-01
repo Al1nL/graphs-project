@@ -9,17 +9,24 @@
 # gitignored, so cloning the repo on the cluster does not bring it: it has to be rebuilt
 # there, or copied there. This script is the rebuild.
 #
-# Usage:
+# Usage (partition and account are already set as directives below -- you only need
+# --array, which selects which datasets to build):
 #
-#   sbatch --partition=studentbatch --array=0-2 scripts/slurm/build_cache.slurm
+#   sbatch --array=0-2 scripts/slurm/build_cache.slurm
 #
-#   # raw downloads on scratch (recommended -- see RAW_DIR below):
-#   sbatch --partition=studentbatch --array=0-2 \
-#          --export=RAW_DIR=/vol/scratch/$USER/raw_data \
+#   # raw downloads somewhere other than ./raw_data (see RAW_DIR below):
+#   sbatch --array=0-2 --export=RAW_DIR=/path/with/room/raw_data \
 #          scripts/slurm/build_cache.slurm
 #
 #   # just one dataset (VOC is index 2 and by far the longest):
-#   sbatch --partition=studentbatch --array=2 scripts/slurm/build_cache.slurm
+#   sbatch --array=2 scripts/slurm/build_cache.slurm
+#
+# BEFORE RUNNING THIS AT ALL: check whether the cache you need already exists. On a shared
+# cluster another account may have built it, and reading theirs makes "every backbone sees
+# the identical PE" true by construction rather than by two builds happening to agree --
+# LAPACK fixes no eigenvector sign convention, so two independent builds under different
+# conda envs can legitimately differ in sign, and in a degenerate eigenspace in basis.
+# Symlink theirs (`ln -s <their-repo>/cache cache`) in preference to rebuilding.
 #
 # RUN THIS BEFORE submit_grid.sh. Every training cell reads the cache, and since the
 # GraphGPS arm started reading it too (backends/graphgps_pe_cache.py), a missing or
@@ -52,6 +59,11 @@
 # LRGB downloads. Home quotas on shared clusters are routinely smaller than 10 GB.
 
 #SBATCH --job-name=pe-cache
+#SBATCH --account=gpu-students
+# cpu-killable: the cluster's CPU-only partition (5-day limit). Correct queue for this job
+# -- it asks for no GPU, so it does not compete for cards and does not consume a GPU
+# partition's per-user job cap. Both directives are overridable on the sbatch command line.
+#SBATCH --partition=cpu-killable
 #SBATCH --output=slurm_logs/%x_%A_%a.out
 #SBATCH --error=slurm_logs/%x_%A_%a.err
 #SBATCH --nodes=1
@@ -59,6 +71,11 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16000
 #SBATCH --time=240
+# "killable" means pre-emptible. A pre-empted build restarts from scratch (there is no
+# resume -- see the TIME AND SIZE note above), so ask Slurm to requeue rather than fail.
+# That is safe here specifically because of the manifest guard below: a requeued task over
+# a COMPLETED cache exits immediately instead of rebuilding it.
+#SBATCH --requeue
 
 set -euo pipefail
 cd "$(dirname "$0")/../.."   # repo root, regardless of where sbatch was invoked from

@@ -111,6 +111,7 @@ EXPORT_VARS="BACKBONE=$BACKBONE,NUM_TARGET_NODES=$NUM_TARGET_NODES,RESULTS_DIR=$
 
 SBATCH_ARGS=(
   --partition="$PARTITION"
+  --account="$ACCOUNT"
   --export="ALL,$EXPORT_VARS"
   --array="${ARRAY_RANGE}%${THROTTLE}"
 )
@@ -119,7 +120,7 @@ SBATCH_ARGS=(
 CMD=(sbatch "${SBATCH_ARGS[@]}" scripts/slurm/run_grid.slurm)
 
 echo "Grid: backbone=$BACKBONE  T=$NUM_TARGET_NODES  partition=$PARTITION  "\
-"array=${ARRAY_RANGE}%${THROTTLE}  constraint=${CONSTRAINT:-<any>}"
+"account=$ACCOUNT  array=${ARRAY_RANGE}%${THROTTLE}  constraint=${CONSTRAINT:-<any>}"
 echo "Command: ${CMD[*]}"
 
 if [ "$DRY_RUN" = "1" ]; then

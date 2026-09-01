@@ -31,6 +31,11 @@
 # work and a lower concurrency reduces how much gets pre-empted at once.
 
 #SBATCH --job-name=pe-grid
+# TAU requires an account as well as a partition; a submission without one is rejected
+# outright. submit_grid.sh passes --account explicitly (default gpu-students) and a
+# command-line flag overrides this directive, so this is only the fallback for someone
+# running `sbatch run_grid.slurm` by hand. Change it if your group's account differs.
+#SBATCH --account=gpu-students
 #SBATCH --output=slurm_logs/%x_%A_%a.out
 #SBATCH --error=slurm_logs/%x_%A_%a.err
 #SBATCH --nodes=1

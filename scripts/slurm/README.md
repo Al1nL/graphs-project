@@ -33,12 +33,19 @@ ssh <you>@slurm-client.cs.tau.ac.il
 # 2. from the repo root, with your conda envs already set up (README "Environment setup")
 cd /path/to/graphs-project
 
-# 3. build the PE cache. It is gitignored, so a fresh clone does NOT have it, and every
+# 3. get the PE cache. It is gitignored, so a fresh clone does NOT have it, and every
 #    backbone reads it -- including GraphGPS since backends/graphgps_pe_cache.py landed.
-#    Three datasets, one array task each, CPU-only, ~45 min for the slowest (VOC).
-sbatch --partition=studentbatch --array=0-2 \
-       --export=RAW_DIR=/vol/scratch/$USER/raw_data \
-       scripts/slurm/build_cache.slurm
+#
+#    PREFER SOMEONE ELSE'S over building your own if one already exists on this cluster.
+#    Two independent builds are not guaranteed to agree: LAPACK fixes no eigenvector sign
+#    convention, so different conda envs can return v where another returns -v (and in a
+#    degenerate eigenspace, a different basis). Sharing one cache makes "every backbone
+#    sees the identical PE" true by construction. RWSE and SPD are unaffected; LapPE is
+#    the exposed one, SignNet partly.
+ln -s /home/yandex/MLWG2026/<them>/graphs-project/cache cache
+
+#    Only if no cache exists yet -- partition/account are already set in the script:
+sbatch --array=0-2 scripts/slurm/build_cache.slurm
 
 # 4. calibrate T once per backbone (NOT per PE/dataset -- it's a property of the probe and
 #    the graph regime; see calibration.py's own docstring). This needs a trained checkpoint,
