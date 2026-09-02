@@ -4,6 +4,32 @@
 #     conda activate graphgps_env
 #     cd ../GraphGPS && pip install -e .        # registers the `graphgps` package
 #
+# ---------------------------------------------------------------------------------------
+# ON A CLUSTER, REDIRECT THE CACHES FIRST -- this env does not fit in a student home dir,
+# and neither do the caches used to build it.
+# ---------------------------------------------------------------------------------------
+# Installing conda somewhere roomy is NOT sufficient. pip caches to $HOME/.cache/pip and
+# conda to ~/.conda/pkgs no matter where the installation lives, so a small home quota
+# fails the build partway through, after tens of minutes, with an error that mentions only
+# the cache path:
+#
+#     WARNING: Building wheel for axial-positional-embedding failed:
+#     [Errno 122] Disk quota exceeded: '/…/pazflashner/.cache/pip/wheels'
+#     CondaEnvException: Pip failed
+#
+# Measured on TAU's nova, where the two filesystems differ by four orders of magnitude:
+#
+#     $HOME        goliath:/homecc/stud_math      1055M used / 1900M quota
+#     /home/yandex netapp1:/Netapp5_yandex           1M used / 16384G quota
+#
+# So before creating the env (add these to your shell rc to make it stick):
+#
+#     export PIP_CACHE_DIR=/home/yandex/<course>/<user>/.cache/pip
+#     export CONDA_PKGS_DIRS=/home/yandex/<course>/<user>/.conda/pkgs
+#     export TMPDIR=/home/yandex/<course>/<user>/tmp
+#
+# The env itself is 6-8 GB and the package cache is comparable, so budget ~15 GB.
+#
 # The env is named graphgps_env, NOT graphgps: scripts/slurm/run_grid.slurm activates
 # `graphgps_env` by that exact name, and envs/san_env.yml already sets the <backbone>_env
 # convention. Upstream's own README uses plain `graphgps`; following it here would make
