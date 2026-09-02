@@ -213,6 +213,25 @@ def build_graphgym_cfg(run_cfg, graphgps_dir: str):
 
 
 # ---------------------------------------------------------------------------
+# run directory layout
+# ---------------------------------------------------------------------------
+def run_dir_for(out_dir: str, seed) -> str:
+    """The directory GraphGPS writes ONE cell's stats and checkpoints into.
+
+    Mirrors main.py's custom_set_run_dir: out_dir/<run_id>, with run_id == seed in the
+    multi-seed mode this launcher reproduces.
+
+    Exists as a function because three places have to agree on it and cannot check each
+    other: graphgps_train sets cfg.run_dir from it, _read_best_metric reads the trained
+    cell's score back out of it, and GraphGPS itself derives the checkpoint directory
+    (run_dir/ckpt) that auto_resume depends on. Spelled out separately, a change to one
+    would not fail -- _read_best_metric would just find no stats.json and return None, so
+    the cell reports a null metric after training perfectly well.
+    """
+    return os.path.join(out_dir, str(seed))
+
+
+# ---------------------------------------------------------------------------
 # training
 # ---------------------------------------------------------------------------
 def graphgps_train(run_cfg, graphgps_dir: Optional[str] = None) -> dict:
@@ -238,11 +257,40 @@ def graphgps_train(run_cfg, graphgps_dir: Optional[str] = None) -> dict:
     from torch_geometric.graphgym.register import train_dict
     from torch_geometric.graphgym.utils.comp_budget import params_count
     from torch_geometric.graphgym.utils.device import auto_select_device
+    from torch_geometric.graphgym.logger import set_printing
     from graphgps.logger import create_logger
     from graphgps.optimizer.extra_optimizers import ExtendedSchedulerConfig
     from torch_geometric.graphgym.optim import OptimizerConfig
 
     cfg = build_graphgym_cfg(run_cfg, graphgps_dir)
+
+    # --- per-run state main.py sets inside its run loop ---------------------------------
+    # build_graphgym_cfg cannot set these: they belong to one iteration of the loop over
+    # seeds, not to the config, and main.py accordingly assigns them per iteration
+    # (main.py:127-135). This launcher runs exactly one cell per process, so the "loop" is
+    # one pass -- but the assignments are still required, and skipping them fails late and
+    # obscurely: `AttributeError: run_dir` raised by yacs from inside create_logger, after
+    # the ~2 min PE pre-transform has already been paid for.
+    #
+    # run_id == seed: main.py's run_loop_settings() uses the seed as the run id in its
+    # multi-seed mode (run_ids = seeds), which is the mode this launcher reproduces. That
+    # is what makes cfg.run_dir == out_dir/<seed>, the layout _read_best_metric and the
+    # `results/raw/<cell>/<seed>/ckpt/` checkpoint path both already assume.
+    cfg.run_id = cfg.seed
+    cfg.run_dir = run_dir_for(cfg.out_dir, cfg.seed)
+    # main.py's custom_set_run_dir branches here on cfg.train.auto_resume and calls
+    # makedirs_rm_exist -- i.e. DELETES the run directory -- when it is False. We force
+    # auto_resume True (see build_graphgym_cfg), so only the exist_ok branch is reachable;
+    # inlining it keeps a destructive path that can never be wanted here out of the code
+    # entirely, rather than leaving it one config edit away from wiping a cell's
+    # checkpoints and stats.
+    os.makedirs(cfg.run_dir, exist_ok=True)
+    # Without this, GraphGPS is SILENT: it reports epoch stats through logging.info, and
+    # an unconfigured root logger defaults to WARNING, so every epoch line is discarded.
+    # It also writes cfg.run_dir/logging.log. Called before create_loader so the loader's
+    # own dataset/PE messages are captured too, matching main.py's order.
+    set_printing()
+
     seed_everything(cfg.seed)
     auto_select_device()
 
@@ -278,7 +326,9 @@ def graphgps_train(run_cfg, graphgps_dir: Optional[str] = None) -> dict:
         num_warmup_epochs=cfg.optim.num_warmup_epochs,
         train_mode=cfg.train.mode, eval_period=cfg.train.eval_period))
 
-    n_params = params_count(model)
+    # custom_train reads cfg.params directly when it logs each epoch
+    # (custom_train.py:45,74), so this is load-bearing, not just bookkeeping.
+    n_params = cfg.params = params_count(model)
     if n_params > 500_000:
         # the proposal commits to a <=500k budget so the arms are comparable
         print(f"  WARNING: {n_params:,} parameters exceeds the 500k budget in the proposal")
@@ -304,7 +354,7 @@ def _read_best_metric(cfg, metric_name) -> Optional[float]:
     """
     import json
 
-    path = os.path.join(cfg.out_dir, str(cfg.seed), "test", "stats.json")
+    path = os.path.join(run_dir_for(cfg.out_dir, cfg.seed), "test", "stats.json")
     if not os.path.exists(path):
         return None
     best = None
