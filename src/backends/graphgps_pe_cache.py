@@ -47,20 +47,33 @@ asks.
 
 INDEX ALIGNMENT
 ---------------
-The cache is keyed (split, index-within-split); GraphGPS pre-transforms one joined dataset.
-The mapping is exact and verified, not assumed:
+The cache is keyed (split, index-within-split); GraphGPS pre-transforms ONE dataset. The
+mapping between them is read off the dataset, not assumed -- assuming it is how this
+module was first wrong, and the assumption looked entirely reasonable.
 
-  * `join_dataset_splits` (master_loader.py) concatenates train, then val, then test,
-    each in its own order, and records the boundaries in `split_idxs`.
-  * `pre_transform_in_memory` (transform/transforms.py) applies the transform over
-    `for i in range(len(dataset))` -- strictly ascending, no shuffling.
-  * `src/pe/compute_pe.py:process_dataset` walked each split in that same order.
+GraphGPS uses TWO different layouts:
 
-So the n-th call of this callable is the n-th graph of the concatenation. A counter is
-sufficient -- and because a counter is a fragile thing to bet an experiment on, every call
-asserts the cached record's node count against the graph actually handed over. Any drift in
-upstream's loader ordering surfaces as a loud IndexError/ValueError on the first mismatched
-graph, not as quietly wrong encodings.
+  * `join_dataset_splits` (VOC, GNNBenchmark) concatenates train, then val, then test.
+    Position alone is the mapping.
+  * `preformat_Peptides` loads ONE dataset in its own file order and attaches
+    `split_idxs = [s_dict['train'], s_dict['val'], s_dict['test']]` -- arbitrary index
+    lists into it. Joined index 0 is the first molecule in FILE order, which is not the
+    first TRAIN molecule.
+
+Assuming concatenation for both paired a 119-node graph with a 338-node cache record on
+the very first Peptides graph. bind_dataset() now reads `split_idxs` and builds the
+mapping from it, which covers both layouts -- in the concatenated case it degenerates to
+exactly the positional mapping.
+
+`pre_transform_in_memory` applies the transform over `for i in range(len(dataset))`,
+strictly ascending, so the call counter still identifies WHICH joined index we are on;
+split_idxs then says where that index lives in the cache.
+
+Because a derived mapping is still a thing to bet an experiment on, every call
+independently verifies the record it fetched against the graph handed over, on both node
+count AND edge count (spd == 1 gives the cached edge count). Any drift in upstream's
+layout surfaces as a loud error on the first mismatched graph rather than as quietly
+wrong encodings.
 """
 
 import os
@@ -139,12 +152,74 @@ class CachedPosencStats:
         self.k_lap = manifest["k_lap"]
         self.k_rwse = manifest["k_rwse"]
         self.calls = 0
+        self._rev = None   # joined index -> (split, pos); set by bind_dataset
 
     def total(self) -> int:
         return sum(self.sizes.values())
 
+    def bind_dataset(self, dataset) -> None:
+        """Learn the joined-index -> (split, position) mapping from the dataset itself.
+
+        GraphGPS assembles the three datasets in TWO different layouts, and assuming
+        either one is how this module was first wrong:
+
+          * join_dataset_splits (VOC, GNNBenchmark) concatenates train, then val, then
+            test, so position alone IS the mapping.
+          * preformat_Peptides loads ONE dataset in its own file order and records
+            `split_idxs = [s_dict['train'], s_dict['val'], s_dict['test']]` -- arbitrary
+            index LISTS into that dataset, not a concatenation. Joined index 0 is the
+            first molecule in file order, which is not the first TRAIN molecule. Assuming
+            otherwise paired a 119-node graph with a 338-node cache record on the very
+            first graph.
+
+        Reading split_idxs covers both, because in the concatenated case it degenerates
+        to exactly the positional mapping. Called from the patched
+        pre_transform_in_memory in install(), which is the only point where the dataset
+        object is visible -- the transform callable itself receives just `data`.
+        """
+        idxs = getattr(dataset, "split_idxs", None)
+        if idxs is None:
+            # No split_idxs: fall back to positional. Left as a fallback rather than an
+            # error because a dataset assembled some third way should still work if its
+            # order happens to match; the per-graph node/edge checks below are what
+            # actually protect correctness.
+            self._rev = None
+            return
+
+        if len(idxs) != len(SPLIT_ORDER):
+            raise ValueError(
+                f"dataset.split_idxs has {len(idxs)} entries, expected "
+                f"{len(SPLIT_ORDER)} ({', '.join(SPLIT_ORDER)}).")
+
+        rev = {}
+        for split, positions in zip(SPLIT_ORDER, idxs):
+            positions = list(positions)
+            if len(positions) != self.sizes[split]:
+                raise ValueError(
+                    f"split '{split}' has {len(positions)} graphs in GraphGPS's dataset "
+                    f"but {self.sizes[split]} in the PE cache. The cache was built from a "
+                    "different version or a different split definition -- rebuild it with "
+                    "src/pe/compute_pe.py.")
+            for pos, joined in enumerate(positions):
+                rev[int(joined)] = (split, pos)
+
+        if len(rev) != self.total():
+            raise ValueError(
+                f"dataset.split_idxs covers {len(rev)} distinct indices but the cache "
+                f"holds {self.total()} graphs -- the split lists overlap.")
+        self._rev = rev
+
     def locate(self, i: int):
         """Map a joined-dataset index onto (split, index within that split)."""
+        if self._rev is not None:
+            try:
+                return self._rev[i]
+            except KeyError:
+                raise IndexError(
+                    f"joined index {i} is not in any split of dataset.split_idxs, which "
+                    f"covers {self.total()} graphs. GraphGPS is pre-transforming a graph "
+                    "the cache has no entry for.") from None
+
         for split in SPLIT_ORDER:
             n = self.sizes[split]
             if i < n:
@@ -163,14 +238,24 @@ class CachedPosencStats:
 
         num_nodes = int(data.num_nodes)
         cached_nodes = int(np.asarray(rec["lap_pe"]).shape[0])
-        if cached_nodes != num_nodes:
+
+        # Edge count as a second, independent check on top of node count. spd == 1 marks
+        # adjacent ordered pairs, so it equals edge_index.shape[1] for PyG's undirected
+        # representation. Node count alone is a weak fingerprint -- molecules of equal
+        # size are common -- so a mapping that is subtly rather than grossly wrong could
+        # slip past it.
+        cached_edges = int((np.asarray(rec["spd"]) == 1).sum())
+        num_edges = int(data.edge_index.shape[1]) if hasattr(data, "edge_index") else -1
+
+        if cached_nodes != num_nodes or (num_edges >= 0 and cached_edges != num_edges):
             raise ValueError(
                 f"PE cache misalignment at joined index {self.calls - 1} "
-                f"({split}[{local}]): the cache has {cached_nodes} nodes, the graph "
-                f"GraphGPS handed over has {num_nodes}. The loader's ordering no longer "
-                "matches the order compute_pe.py cached in -- see this module's INDEX "
-                "ALIGNMENT note. Do NOT relax this check; silently misaligned PEs would "
-                "invalidate every number in the run.")
+                f"({split}[{local}]): cache has {cached_nodes} nodes / {cached_edges} "
+                f"edges, the graph GraphGPS handed over has {num_nodes} nodes / "
+                f"{num_edges} edges. The loader's ordering does not match the order "
+                "compute_pe.py cached in -- see this module's INDEX ALIGNMENT note. Do "
+                "NOT relax this check; silently misaligned PEs would invalidate every "
+                "number in the run.")
 
         if "LapPE" in pe_types or "EquivStableLapPE" in pe_types:
             data.EigVals, data.EigVecs = lap_to_graphgps(
@@ -251,4 +336,21 @@ def install(run_cfg, cfg=None) -> CachedPosencStats:
                     f"times_func={getattr(rwse.kernel, 'times_func', None)!r})")
 
     master_loader.compute_posenc_stats = stats
+
+    # Also wrap pre_transform_in_memory, purely to get a look at the dataset OBJECT before
+    # the per-graph calls start. The transform callable receives only `data`, so this is
+    # the sole point where `dataset.split_idxs` -- which says how GraphGPS laid the three
+    # splits out -- is reachable. master_loader deletes that attribute after the posenc
+    # pass (see its `delattr(dataset, 'split_idxs')`), so it must be read here, not later.
+    original = master_loader.pre_transform_in_memory
+
+    def _capture_dataset(dataset, transform_func, show_progress=False):
+        # master_loader calls this several times (task-specific preprocessing, posenc,
+        # clipping). Bind only on the posenc pass, identified by our own callable sitting
+        # inside the functools.partial it builds.
+        if getattr(transform_func, "func", transform_func) is stats:
+            stats.bind_dataset(dataset)
+        return original(dataset, transform_func, show_progress)
+
+    master_loader.pre_transform_in_memory = _capture_dataset
     return stats

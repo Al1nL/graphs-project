@@ -48,7 +48,12 @@ def _write_cache(root, sizes, node_counts):
             eig = np.zeros(K_LAP, dtype=np.float32)
             eig[:k_eff] = np.sort(rng.random(k_eff))
             rwse = rng.random((n, K_RWSE)).astype(np.float32)
-            spd = rng.integers(0, 5, size=(n, n)).astype(np.uint8)
+            # spd for a PATH graph: d(i,j) = |i-j|. Not arbitrary -- the adapter derives
+            # the cached edge count from (spd == 1) and checks it against the graph handed
+            # over, so the fixture has to describe a real graph. _FakeDataset builds the
+            # matching path edge_index, giving 2*(n-1) in both places.
+            ii = np.arange(n)
+            spd = np.abs(ii[:, None] - ii[None, :]).astype(np.uint8)
             recs.append((lap_pe, eig, rwse, spd))
         w.write_split(split, iter(recs), total=len(recs))
     w.finalize()
@@ -119,10 +124,14 @@ def test_values_pass_through_unchanged():
     print("PASS  test_values_pass_through_unchanged")
 
 
+# ignore_cleanup_errors: PECache memory-maps every array it reads, and on Windows a
+# mapped file cannot be unlinked while the mapping is alive. The mappings are released
+# when the PECache objects are collected, which is not deterministic, so teardown can
+# race the GC. Nothing here depends on the directory actually being removed.
 def test_joined_index_maps_onto_the_right_split_in_train_val_test_order():
     sizes = {"train": 4, "val": 2, "test": 3}
     counts = {s: [20 + i for i in range(sizes[s])] for s in SPLIT_ORDER}
-    with tempfile.TemporaryDirectory() as root:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as root:
         _write_cache(root, sizes, counts)
         stats = CachedPosencStats(root)
         assert stats.total() == 9
@@ -137,7 +146,7 @@ def test_joined_index_maps_onto_the_right_split_in_train_val_test_order():
 def test_widths_are_read_from_the_manifest_not_hardcoded():
     sizes = {"train": 2, "val": 1, "test": 1}
     counts = {s: [30] * sizes[s] for s in SPLIT_ORDER}
-    with tempfile.TemporaryDirectory() as root:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as root:
         _write_cache(root, sizes, counts)
         stats = CachedPosencStats(root)
         assert stats.k_lap == K_LAP and stats.k_rwse == K_RWSE
@@ -149,7 +158,7 @@ def test_a_node_count_mismatch_raises_instead_of_encoding_the_wrong_graph():
     loudly rather than attach graph i's PE to graph j."""
     sizes = {"train": 2, "val": 1, "test": 1}
     counts = {"train": [30, 31], "val": [32], "test": [33]}
-    with tempfile.TemporaryDirectory() as root:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as root:
         _write_cache(root, sizes, counts)
         stats = CachedPosencStats(root)
         try:
@@ -164,7 +173,7 @@ def test_a_node_count_mismatch_raises_instead_of_encoding_the_wrong_graph():
 def test_running_off_the_end_of_the_cache_raises():
     sizes = {"train": 1, "val": 1, "test": 1}
     counts = {s: [25] for s in SPLIT_ORDER}
-    with tempfile.TemporaryDirectory() as root:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as root:
         _write_cache(root, sizes, counts)
         stats = CachedPosencStats(root)
         for _ in range(3):
@@ -181,7 +190,7 @@ def test_running_off_the_end_of_the_cache_raises():
 def test_each_pe_type_attaches_the_attributes_graphgps_encoders_read():
     sizes = {"train": 3, "val": 1, "test": 1}
     counts = {s: [40] * sizes[s] for s in SPLIT_ORDER}
-    with tempfile.TemporaryDirectory() as root:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as root:
         _write_cache(root, sizes, counts)
         stats = CachedPosencStats(root)
 
@@ -202,7 +211,7 @@ def test_an_uncached_pe_type_refuses_rather_than_falling_back():
     inconsistency this module removes, so an unknown PE must be an error."""
     sizes = {"train": 1, "val": 1, "test": 1}
     counts = {s: [22] for s in SPLIT_ORDER}
-    with tempfile.TemporaryDirectory() as root:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as root:
         _write_cache(root, sizes, counts)
         stats = CachedPosencStats(root)
         try:
@@ -226,8 +235,15 @@ def _stub_graphgps_loader():
     for name in ("graphgps", "graphgps.loader", "graphgps.loader.master_loader"):
         mods[name] = sys.modules.get(name)
         sys.modules[name] = types.ModuleType(name)
-    sys.modules["graphgps.loader"].master_loader = sys.modules["graphgps.loader.master_loader"]
-    sys.modules["graphgps.loader.master_loader"].compute_posenc_stats = lambda *a, **k: None
+    ml = sys.modules["graphgps.loader.master_loader"]
+    sys.modules["graphgps.loader"].master_loader = ml
+    ml.compute_posenc_stats = lambda *a, **k: None
+
+    # Mirrors transforms.pre_transform_in_memory: ascending, no shuffling. install()
+    # wraps this to get at the dataset object, so the stub must provide it.
+    def _ptim(dataset, transform_func, show_progress=False):
+        return [transform_func(dataset.get(i)) for i in range(len(dataset))]
+    ml.pre_transform_in_memory = _ptim
     return mods
 
 
@@ -256,7 +272,7 @@ def test_install_patches_the_loader_and_reads_cache_dir_as_a_property():
 
     sizes = {"train": 2, "val": 1, "test": 1}
     counts = {s: [24] * sizes[s] for s in SPLIT_ORDER}
-    with tempfile.TemporaryDirectory() as root:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as root:
         _write_cache(root, sizes, counts)
         saved = _stub_graphgps_loader()
         try:
@@ -281,7 +297,7 @@ def test_install_refuses_a_config_whose_width_disagrees_with_the_cache():
 
     sizes = {"train": 1, "val": 1, "test": 1}
     counts = {s: [24] for s in SPLIT_ORDER}
-    with tempfile.TemporaryDirectory() as root:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as root:
         _write_cache(root, sizes, counts)
         saved = _stub_graphgps_loader()
         try:
@@ -320,7 +336,7 @@ def test_rwse_width_check_resolves_times_from_times_func():
 
     sizes = {"train": 1, "val": 1, "test": 1}
     counts = {s: [24] for s in SPLIT_ORDER}
-    with tempfile.TemporaryDirectory() as root:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as root:
         _write_cache(root, sizes, counts)
         saved = _stub_graphgps_loader()
         try:
@@ -365,6 +381,104 @@ def test_rwse_width_check_resolves_times_from_times_func():
         finally:
             _unstub(saved)
     print("PASS  test_rwse_width_check_resolves_times_from_times_func")
+
+
+class _FakeDataset:
+    """Stands in for GraphGPS's dataset: node counts in FILE order, plus split_idxs."""
+    def __init__(self, node_counts, split_idxs):
+        self.node_counts = node_counts
+        self.split_idxs = split_idxs
+
+    def __len__(self):
+        return len(self.node_counts)
+
+    def get(self, i):
+        import torch as _t
+        n = self.node_counts[i]
+        d = _Data(n)
+        # a path graph's undirected edge_index: 2*(n-1) columns, matching the cache's
+        # spd==1 count for the same structure written by _write_cache
+        und = [(a, a + 1) for a in range(n - 1)]
+        d.edge_index = _t.tensor(und + [(b, a) for a, b in und]).t()
+        return d
+
+
+def test_peptides_layout_maps_through_split_idxs_not_position():
+    """REGRESSION: the real failure on the cluster.
+
+        ValueError: PE cache misalignment at joined index 0 (train[0]): the cache has
+        338 nodes, the graph GraphGPS handed over has 119.
+
+    preformat_Peptides loads ONE dataset in file order and attaches split_idxs as index
+    LISTS into it, so joined index 0 is the first molecule in the file, not the first
+    TRAIN molecule. This module assumed join_dataset_splits' train/val/test concatenation
+    for every dataset, which is true for VOC and false for Peptides.
+    """
+    from backends.graphgps_pe_cache import install
+    from config import RunConfig
+    import functools
+
+    # cache: train has 3 graphs, val 1, test 1 -- with DISTINCT node counts so a wrong
+    # mapping cannot accidentally pass the node-count check
+    sizes = {"train": 3, "val": 1, "test": 1}
+    counts = {"train": [30, 31, 32], "val": [40], "test": [50]}
+
+    # GraphGPS's file order interleaves them; split_idxs says where each one went
+    file_order = [40, 30, 50, 32, 31]           # val, train0, test, train2, train1
+    split_idxs = [[1, 4, 3], [0], [2]]          # train, val, test
+
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as root:
+        _write_cache(root, sizes, counts)
+        saved = _stub_graphgps_loader()
+        try:
+            run_cfg = RunConfig(backbone="gps", pe="rwse", dataset="peptides-func",
+                                seed=0, cache_dir=root)
+            stats = install(run_cfg)
+            ml = sys.modules["graphgps.loader.master_loader"]
+
+            ds = _FakeDataset(file_order, split_idxs)
+            # exactly how master_loader invokes it
+            ml.pre_transform_in_memory(ds, functools.partial(stats, pe_types=["RWSE"]))
+
+            assert stats.calls == 5, stats.calls
+            assert stats.locate(0) == ("val", 0)
+            assert stats.locate(1) == ("train", 0)
+            assert stats.locate(2) == ("test", 0)
+            assert stats.locate(3) == ("train", 2)
+            assert stats.locate(4) == ("train", 1)
+        finally:
+            _unstub(saved)
+    print("PASS  test_peptides_layout_maps_through_split_idxs_not_position")
+
+
+def test_split_idxs_that_disagree_with_the_cache_size_are_rejected():
+    """A cache built from a different split definition must fail at bind time, before
+    any graph is encoded."""
+    from backends.graphgps_pe_cache import install
+    from config import RunConfig
+    import functools
+
+    sizes = {"train": 2, "val": 1, "test": 1}
+    counts = {"train": [30, 31], "val": [40], "test": [50]}
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as root:
+        _write_cache(root, sizes, counts)
+        saved = _stub_graphgps_loader()
+        try:
+            run_cfg = RunConfig(backbone="gps", pe="rwse", dataset="peptides-func",
+                                seed=0, cache_dir=root)
+            stats = install(run_cfg)
+            ml = sys.modules["graphgps.loader.master_loader"]
+            # three train graphs in the dataset, two in the cache
+            ds = _FakeDataset([30, 31, 32, 40, 50], [[0, 1, 2], [3], [4]])
+            try:
+                ml.pre_transform_in_memory(ds, functools.partial(stats, pe_types=["RWSE"]))
+            except ValueError as exc:
+                assert "train" in str(exc) and "PE cache" in str(exc)
+                print("PASS  test_split_idxs_that_disagree_with_the_cache_size_are_rejected")
+                return
+            raise AssertionError("a split-size disagreement was accepted")
+        finally:
+            _unstub(saved)
 
 
 if __name__ == "__main__":
