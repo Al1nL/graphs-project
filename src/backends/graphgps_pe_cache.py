@@ -218,7 +218,9 @@ def install(run_cfg, cfg=None) -> CachedPosencStats:
     """
     from graphgps.loader import master_loader
 
-    stats = CachedPosencStats(run_cfg.resolved_cache_dir())
+    # No parentheses: resolved_cache_dir is a @property on RunConfig, unlike its
+    # resolved_max_dist()/resolved_num_probe_graphs() neighbours, which are plain methods.
+    stats = CachedPosencStats(run_cfg.resolved_cache_dir)
 
     if cfg is not None:
         for key in ("posenc_LapPE", "posenc_SignNet"):

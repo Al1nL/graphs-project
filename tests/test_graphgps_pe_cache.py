@@ -214,6 +214,97 @@ def test_an_uncached_pe_type_refuses_rather_than_falling_back():
     raise AssertionError("an uncached PE type was silently ignored")
 
 
+def _stub_graphgps_loader():
+    """Put a fake graphgps.loader.master_loader into sys.modules.
+
+    install() imports it, which is why nothing here reached install() at all -- and that
+    gap is exactly how the bug below survived to a live run. The import is upstream's; the
+    PATCHING is ours, and ours is testable without GraphGPS installed.
+    """
+    import types
+    mods = {}
+    for name in ("graphgps", "graphgps.loader", "graphgps.loader.master_loader"):
+        mods[name] = sys.modules.get(name)
+        sys.modules[name] = types.ModuleType(name)
+    sys.modules["graphgps.loader"].master_loader = sys.modules["graphgps.loader.master_loader"]
+    sys.modules["graphgps.loader.master_loader"].compute_posenc_stats = lambda *a, **k: None
+    return mods
+
+
+def _unstub(saved):
+    for name, mod in saved.items():
+        if mod is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = mod
+
+
+def test_install_patches_the_loader_and_reads_cache_dir_as_a_property():
+    """REGRESSION: install() called `run_cfg.resolved_cache_dir()` with parentheses.
+
+    That attribute is a @property on RunConfig -- unlike its resolved_max_dist() and
+    resolved_num_probe_graphs() neighbours, which are plain methods -- so the call raised
+
+        TypeError: 'str' object is not callable
+
+    on the first real run, after a conda env had been built and a GPU allocated. Uses the
+    REAL RunConfig rather than a stand-in, because the whole point is which side of that
+    property/method split the attribute falls on.
+    """
+    from backends.graphgps_pe_cache import install
+    from config import RunConfig
+
+    sizes = {"train": 2, "val": 1, "test": 1}
+    counts = {s: [24] * sizes[s] for s in SPLIT_ORDER}
+    with tempfile.TemporaryDirectory() as root:
+        _write_cache(root, sizes, counts)
+        saved = _stub_graphgps_loader()
+        try:
+            run_cfg = RunConfig(backbone="gps", pe="rwse", dataset="peptides-func",
+                                seed=0, cache_dir=root)
+            stats = install(run_cfg)
+            patched = sys.modules["graphgps.loader.master_loader"].compute_posenc_stats
+            assert patched is stats, "install() did not patch master_loader"
+            assert isinstance(patched, CachedPosencStats)
+            assert stats.total() == 4
+        finally:
+            _unstub(saved)
+    print("PASS  test_install_patches_the_loader_and_reads_cache_dir_as_a_property")
+
+
+def test_install_refuses_a_config_whose_width_disagrees_with_the_cache():
+    """The guard that turns a width mismatch into an error before training, rather than a
+    shape failure hundreds of graphs into a pre-transform."""
+    import types
+    from backends.graphgps_pe_cache import install
+    from config import RunConfig
+
+    sizes = {"train": 1, "val": 1, "test": 1}
+    counts = {s: [24] for s in SPLIT_ORDER}
+    with tempfile.TemporaryDirectory() as root:
+        _write_cache(root, sizes, counts)
+        saved = _stub_graphgps_loader()
+        try:
+            run_cfg = RunConfig(backbone="gps", pe="lappe", dataset="peptides-func",
+                                seed=0, cache_dir=root)
+            bad = types.SimpleNamespace(
+                posenc_LapPE=types.SimpleNamespace(
+                    enable=True, eigen=types.SimpleNamespace(max_freqs=10)),
+                posenc_SignNet=types.SimpleNamespace(
+                    enable=False, eigen=types.SimpleNamespace(max_freqs=10)),
+                posenc_RWSE=types.SimpleNamespace(
+                    enable=False, kernel=types.SimpleNamespace(times=[])))
+            try:
+                install(run_cfg, bad)
+            except ValueError as exc:
+                assert "max_freqs" in str(exc) and str(K_LAP) in str(exc)
+                print("PASS  test_install_refuses_a_config_whose_width_disagrees_with_the_cache")
+                return
+            raise AssertionError("a max_freqs/cache width mismatch was accepted")
+        finally:
+            _unstub(saved)
+
+
 if __name__ == "__main__":
     for name, fn in sorted(list(globals().items())):
         if name.startswith("test_") and callable(fn):
