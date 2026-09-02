@@ -344,6 +344,87 @@ def test_build_graphgym_cfg_runs_graphgyms_config_post_processing():
         "and a previous cell's values would otherwise leak into this one")
 
 
+def test_truncated_loader_stops_early_but_stays_a_loader():
+    """--smoke-test on the gps arm was a no-op: only san_backend honoured it, so a
+    "smoke test" on GraphGPS silently ran the base YAML's full 200 epochs.
+
+    The wrapper has to keep behaving like a DataLoader, because custom_train reaches past
+    the iterator: it calls len(loader) to find the last batch for gradient accumulation,
+    and logs len(loader.dataset).
+    """
+    class _FakeLoader:
+        dataset = list(range(500))          # the real split, unshrunk
+        batch_size = 128
+
+        def __iter__(self):
+            return iter(range(10))
+
+        def __len__(self):
+            return 10
+
+    wrapped = graphgps_backend._TruncatedLoader(_FakeLoader(), 2)
+
+    assert list(wrapped) == [0, 1], "the wrapper did not stop after n batches"
+    assert len(wrapped) == 2, (
+        "len() must report the TRUNCATED count -- custom_train uses `iter + 1 == "
+        "len(loader)` as the gradient-accumulation boundary, so a full-length len() "
+        "would mean the final step never fires")
+    # unknown attributes fall through to the real loader
+    assert len(wrapped.dataset) == 500, (
+        "the wrapper shadowed .dataset; the split-size log line would understate it")
+    assert wrapped.batch_size == 128
+
+    # truncating to more batches than exist must not invent any
+    assert len(graphgps_backend._TruncatedLoader(_FakeLoader(), 99)) == 10
+    assert list(graphgps_backend._TruncatedLoader(_FakeLoader(), 99)) == list(range(10))
+
+
+def test_truncated_loader_is_re_iterable():
+    """custom_train iterates the train loader once per epoch. A generator-based wrapper
+    that could only be consumed once would give an empty second epoch -- silently, since
+    an empty loop raises nothing."""
+    class _FakeLoader:
+        def __iter__(self):
+            return iter(range(10))
+
+        def __len__(self):
+            return 10
+
+    wrapped = graphgps_backend._TruncatedLoader(_FakeLoader(), 2)
+    assert list(wrapped) == [0, 1]
+    assert list(wrapped) == [0, 1], "second pass over the loader came back empty"
+
+
+def test_smoke_test_forces_one_epoch_and_drops_the_warmup():
+    """Checked on the source: build_graphgym_cfg needs the GraphGPS clone.
+
+    Both assignments matter. max_epoch 1 is the point of the flag. Dropping the warmup is
+    what makes that one epoch informative: the reference schedule is cosine_with_warmup
+    over 10 warmup epochs, so at max_epoch 1 the LR would stay at 0 for the entire run and
+    the loss could not move -- a flat curve for a reason unrelated to the model.
+    """
+    import ast
+
+    src = os.path.join(os.path.dirname(__file__), "..", "src", "backends",
+                       "graphgps_backend.py")
+    with open(src, encoding="utf-8") as f:
+        tree = ast.parse(f.read())
+
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "build_graphgym_cfg")
+
+    guarded = [n for n in ast.walk(fn)
+               if isinstance(n, ast.If) and "smoke_test" in ast.dump(n.test)]
+    assert guarded, "build_graphgym_cfg does not branch on smoke_test"
+
+    assigned = {t.attr for node in guarded for n in ast.walk(node)
+                if isinstance(n, ast.Assign) for t in n.targets
+                if isinstance(t, ast.Attribute)}
+    assert "max_epoch" in assigned, "smoke_test does not force max_epoch"
+    assert "num_warmup_epochs" in assigned, (
+        "smoke_test does not drop the warmup, so its single epoch would train at LR 0")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

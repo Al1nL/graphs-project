@@ -241,6 +241,15 @@ def build_graphgym_cfg(run_cfg, graphgps_dir: str):
     cfg.out_dir = os.path.join(run_cfg.results_dir, "raw", run_cfg.run_id)
     if run_cfg.epochs is not None:
         cfg.optim.max_epoch = run_cfg.epochs
+    if getattr(run_cfg, "smoke_test", False):
+        # Last, so it wins over --epochs, matching san_backend.
+        cfg.optim.max_epoch = 1
+        # The reference schedule is cosine_with_warmup over 10 warmup epochs. At
+        # max_epoch 1 the warmup never completes, so the LR stays at 0 for the whole run
+        # and the loss cannot move -- a smoke test that reports a suspiciously flat curve
+        # for a reason that has nothing to do with the model. Shape-checking does not need
+        # a schedule; drop the warmup so the one epoch trains at the base LR.
+        cfg.optim.num_warmup_epochs = 0
     cfg.train.mode = "custom"          # GraphGPS's own loop; 'standard' needs lightning
     cfg.wandb.use = False              # the launcher owns logging
 
@@ -291,6 +300,43 @@ def build_graphgym_cfg(run_cfg, graphgps_dir: str):
     # because VOC opts out of it.
     assert_cfg(cfg)
     return cfg
+
+
+# ---------------------------------------------------------------------------
+# smoke testing
+# ---------------------------------------------------------------------------
+SMOKE_TEST_BATCHES = 2
+
+
+class _TruncatedLoader:
+    """A DataLoader that stops after n batches, for --smoke-test.
+
+    Wraps rather than rebuilds so the batches are byte-identical to a real run's -- same
+    dataset, sampler, collate and PE tensors. The point of a smoke test is to exercise the
+    real path cheaply, so anything that made these batches special would defeat it.
+
+    Forwards unknown attributes because GraphGPS reaches past the iterator: custom_train
+    calls len(loader) to detect the last batch for gradient accumulation, and logs
+    len(loader.dataset). len() reports the truncated count (the accumulation boundary must
+    match what is actually iterated); .dataset falls through to the real one, so the log
+    line still states the true split size rather than implying the dataset shrank.
+    """
+
+    def __init__(self, loader, n_batches: int):
+        self._loader = loader
+        self._n_batches = n_batches
+
+    def __iter__(self):
+        for i, batch in enumerate(self._loader):
+            if i >= self._n_batches:
+                return
+            yield batch
+
+    def __len__(self):
+        return min(self._n_batches, len(self._loader))
+
+    def __getattr__(self, name):
+        return getattr(self._loader, name)
 
 
 # ---------------------------------------------------------------------------
@@ -399,6 +445,13 @@ def graphgps_train(run_cfg, graphgps_dir: Optional[str] = None) -> dict:
     pe_cache = install_pe_cache(run_cfg, cfg) if run_cfg.pe != "none" else None
 
     loaders = create_loader()
+
+    if getattr(run_cfg, "smoke_test", False):
+        # Applied AFTER create_loader so the dataset build and the PE pre-transform still
+        # run in full -- those are the parts a smoke test most needs to exercise, and they
+        # are where every failure on this branch so far has actually been.
+        loaders = [_TruncatedLoader(dl, SMOKE_TEST_BATCHES) for dl in loaders]
+        print(f"  SMOKE TEST: 1 epoch, {SMOKE_TEST_BATCHES} batches per split")
 
     if pe_cache is not None and pe_cache.calls == 0:
         raise RuntimeError(
