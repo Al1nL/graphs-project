@@ -61,6 +61,13 @@ for backbone in wanted:
                               capture_output=True, text=True).stdout.strip()
         print(f"[{backbone}] NOT PINNED. Record this in config.PINNED_COMMITS before "
               f"producing any results:\n    \"{backbone}\": \"{head}\",")
+
+    # Cloning is NOT enough to make the package importable. GraphGPS registers its custom
+    # modules into GraphGym as an import side effect (`import graphgps`), which only
+    # resolves once the clone is installed into the active env. This script cannot do it:
+    # each backbone needs its OWN env (their PyG/DGL/CUDA pins conflict), and the right one
+    # may not be active -- installing into the wrong env is worse than not installing.
+    print(f"[{backbone}] NEXT, in this backbone's conda env:  pip install -e {path}")
 PYEOF
 
 echo
