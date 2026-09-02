@@ -111,15 +111,32 @@ task metric or sensitivity curve themselves.
 
 ## Smoke test before submitting 45 cells
 
-`studentrun` (3-hour interactive) is for exactly this. Get one node:
+**Interactive shells are refused on this cluster.** `srun --pty bash` returns
+
+```
+srun: error: Running shells is not permitted.  Use containers instead.
+```
+
+so run the command *as* the srun payload rather than getting a shell first. Note
+`--gpus=1` is required — without it you get a CPU-only allocation and
+`torch.cuda.is_available()` reports `False` for a perfectly good CUDA build:
 
 ```bash
-srun --partition=studentrun --gpus=1 --cpus-per-task=4 --mem=16000 --pty bash
-# now on a compute node:
-conda activate graphgps_env
-python src/run_experiment.py --backbone gps --pe none --dataset peptides-func --seed 0 \
-    --num-target-nodes 32 --dry-run     # sanity-checks the adapter config, trains nothing
+# activate first: srun inherits the submitting environment
+source /path/to/miniforge3/etc/profile.d/conda.sh && conda activate graphgps_env
+
+srun --partition=studentkillable --account=gpu-students --gpus=1 --time=10 \
+     python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+
+srun --partition=studentkillable --account=gpu-students --gpus=1 --time=30 \
+     python src/run_experiment.py --backbone gps --pe none --dataset peptides-func \
+     --seed 0 --num-target-nodes 32 --dry-run
 ```
+
+Use the absolute interpreter path (`.../envs/graphgps_env/bin/python`) if you would
+rather not rely on the activated `PATH` being forwarded. For anything longer than a
+few minutes, use `sbatch` rather than `srun` — a dropped SSH session kills an `srun`
+that is still attached to your terminal.
 
 Confirm the adapter config prints what you expect before spending real GPU time. Drop
 `--dry-run` to actually train inside the interactive session if you want to watch the first
