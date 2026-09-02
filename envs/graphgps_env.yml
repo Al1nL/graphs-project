@@ -74,6 +74,18 @@ dependencies:
   - torchaudio
   - pytorch-cuda=11.7
 
+  # MKL MUST BE HELD BELOW 2024. pytorch 1.13's libtorch_cpu.so links Intel's ittnotify
+  # symbol iJIT_NotifyEvent, which MKL 2024 removed. Nothing constrains this from pytorch's
+  # side, so a fresh solve happily takes the newest MKL (2025.3.1 here) and the env builds
+  # cleanly, then dies on the very first `import torch`:
+  #
+  #     ImportError: .../torch/lib/libtorch_cpu.so: undefined symbol: iJIT_NotifyEvent
+  #
+  # Note this is a CPU-side symbol -- it has nothing to do with CUDA, and a correct
+  # cuda11.7 pytorch build fails exactly the same way, which makes it easy to misread as
+  # the CUDA problem it is not.
+  - mkl<2024
+
   # DO NOT REMOVE, AND DO NOT ASSUME pytorch-cuda ABOVE IS ENOUGH. Without this line the
   # solve is still SATISFIABLE and still silently WRONG: it pulls `cpuonly` plus
   # `pytorch-mutex=1.0=cpu` and resolves pytorch to `py3.10_cpu_0` -- CUDA runtime
