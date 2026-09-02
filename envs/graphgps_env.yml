@@ -132,6 +132,22 @@ dependencies:
 
   - fsspec
 
+  # RDKit is REQUIRED for peptides-func and peptides-struct, which is not obvious from
+  # grepping GraphGPS for "rdkit" -- the only direct import there is in the PCQM4Mv2
+  # module, which this study never loads. The dependency is one level down:
+  #
+  #   graphgps/loader/dataset/peptides_functional.py
+  #     from ogb.utils import smiles2graph     <- module level
+  #       ogb.utils.mol                        <- imports rdkit
+  #
+  # Without it, create_loader() dies partway into building the dataset with
+  # "ImportError: cannot import name 'smiles2graph' from 'ogb.utils'", which names
+  # neither rdkit nor the loader that needed it.
+  #
+  # openbabel, which upstream's README installs in the same line, stays out: it is only
+  # used by the PCQM4Mv2 path.
+  - rdkit
+
   # --- shared-harness deps (src/pe, src/sensitivity.py, src/run_experiment.py). The probe
   # runs in THIS env, in-process against the trained model, so they belong here and not
   # only in requirements.txt.
@@ -222,10 +238,10 @@ dependencies:
 #                      gates fp16 Performer attention, which GPS's LRGB configs do not use.
 #   fast_transformers  imported INSIDE causal_linear_attention(); reachable only via causal
 #                      linear attention, which GPS does not call.
-#   rdkit, openbabel   upstream lists them for OGB-LSC PCQM4Mv2. The dataset module that
-#                      needs them is imported inside a function (master_loader.py:473), so
-#                      the three LRGB datasets in this study never reach it. Add them back
-#                      only if the study grows a PCQM4Mv2 arm.
+#   openbabel          upstream lists it alongside rdkit for OGB-LSC PCQM4Mv2. Unlike
+#                      rdkit -- which turned out to be REQUIRED, see its entry above --
+#                      openbabel is only reached by the PCQM4Mv2 path, which this study
+#                      does not load. Add it back only if the study grows such an arm.
 #
 # If one of these ever surfaces as an ImportError, that means the import path changed --
 # check what pulled it in before adding the package, because it may mean a code path was
