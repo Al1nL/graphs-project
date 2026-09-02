@@ -68,6 +68,19 @@ dependencies:
   - python=3.10
   - pip
 
+  # setuptools 81 REMOVED pkg_resources, which 2022-era packages still import at module
+  # scope. pytorch-lightning 1.9.5 is the one that surfaces it here --
+  # lightning_fabric/__init__.py does `__import__("pkg_resources").declare_namespace(...)`
+  # -- and the failure is invisible because PyG's graphgym wraps the import in try/except
+  # and only warns:
+  #
+  #     UserWarning: Please install 'pytorch_lightning' ...
+  #
+  # i.e. it reports the package as MISSING when it is installed and merely unimportable.
+  # Pinned rather than dropping lightning, because pkg_resources is a common assumption in
+  # code of this vintage and this protects the rest of the pinned set too.
+  - setuptools<81
+
   # --- upstream's pinned core. Versions are GraphGPS's, not ours.
   - pytorch=1.13
   - torchvision
