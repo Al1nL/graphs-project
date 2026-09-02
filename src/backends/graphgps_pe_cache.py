@@ -232,10 +232,23 @@ def install(run_cfg, cfg=None) -> CachedPosencStats:
                     "the cache disagree on width -- fix PE_SPEC or rebuild the cache; do "
                     "not pad or truncate to bridge them.")
         rwse = getattr(cfg, "posenc_RWSE", None)
-        if rwse is not None and rwse.enable and len(rwse.kernel.times) != stats.k_rwse:
-            raise ValueError(
-                f"posenc_RWSE.kernel.times has {len(rwse.kernel.times)} steps but the PE "
-                f"cache holds {stats.k_rwse}.")
+        if rwse is not None and rwse.enable:
+            # `times` is NOT populated yet at this point. master_loader fills it in from
+            # `times_func` inside load_dataset_master --
+            #     if pecfg.kernel.times_func:
+            #         pecfg.kernel.times = list(eval(pecfg.kernel.times_func))
+            # -- which runs during create_loader(), AFTER install(). Reading `times` alone
+            # here saw an empty list and reported "0 steps but the cache holds 20" against
+            # a perfectly correct config. Resolve it the same way upstream does, so the
+            # guard does not depend on which side of create_loader() it is called from.
+            times = list(rwse.kernel.times)
+            if not times and getattr(rwse.kernel, "times_func", ""):
+                times = list(eval(rwse.kernel.times_func))
+            if len(times) != stats.k_rwse:
+                raise ValueError(
+                    f"posenc_RWSE resolves to {len(times)} kernel steps but the PE cache "
+                    f"holds {stats.k_rwse}. (times={rwse.kernel.times!r}, "
+                    f"times_func={getattr(rwse.kernel, 'times_func', None)!r})")
 
     master_loader.compute_posenc_stats = stats
     return stats

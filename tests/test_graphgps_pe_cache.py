@@ -305,6 +305,68 @@ def test_install_refuses_a_config_whose_width_disagrees_with_the_cache():
             _unstub(saved)
 
 
+def test_rwse_width_check_resolves_times_from_times_func():
+    """REGRESSION: the guard read cfg.posenc_RWSE.kernel.times, which is EMPTY when
+    install() runs.
+
+    master_loader fills `times` in from `times_func` inside load_dataset_master, during
+    create_loader() -- after install(). So a correct config was rejected with
+    "0 steps but the PE cache holds 20". The guard must resolve times_func the same way
+    upstream will.
+    """
+    import types
+    from backends.graphgps_pe_cache import install
+    from config import RunConfig
+
+    sizes = {"train": 1, "val": 1, "test": 1}
+    counts = {s: [24] for s in SPLIT_ORDER}
+    with tempfile.TemporaryDirectory() as root:
+        _write_cache(root, sizes, counts)
+        saved = _stub_graphgps_loader()
+        try:
+            run_cfg = RunConfig(backbone="gps", pe="rwse", dataset="peptides-func",
+                                seed=0, cache_dir=root)
+
+            # exactly what build_graphgym_cfg produces BEFORE create_loader() runs
+            pre_loader = types.SimpleNamespace(
+                posenc_LapPE=types.SimpleNamespace(
+                    enable=False, eigen=types.SimpleNamespace(max_freqs=K_LAP)),
+                posenc_SignNet=types.SimpleNamespace(
+                    enable=False, eigen=types.SimpleNamespace(max_freqs=K_LAP)),
+                posenc_RWSE=types.SimpleNamespace(
+                    enable=True,
+                    kernel=types.SimpleNamespace(times=[],
+                                                 times_func=f"range(1,{K_RWSE + 1})")))
+            install(run_cfg, pre_loader)   # must NOT raise
+
+            # and after the loader has expanded it, the same check still holds
+            post_loader = types.SimpleNamespace(
+                posenc_LapPE=pre_loader.posenc_LapPE,
+                posenc_SignNet=pre_loader.posenc_SignNet,
+                posenc_RWSE=types.SimpleNamespace(
+                    enable=True,
+                    kernel=types.SimpleNamespace(times=list(range(1, K_RWSE + 1)),
+                                                 times_func=f"range(1,{K_RWSE + 1})")))
+            install(run_cfg, post_loader)  # must NOT raise
+
+            # a genuine mismatch must still be caught
+            wrong = types.SimpleNamespace(
+                posenc_LapPE=pre_loader.posenc_LapPE,
+                posenc_SignNet=pre_loader.posenc_SignNet,
+                posenc_RWSE=types.SimpleNamespace(
+                    enable=True,
+                    kernel=types.SimpleNamespace(times=[], times_func="range(1,8)")))
+            try:
+                install(run_cfg, wrong)
+            except ValueError as exc:
+                assert "kernel steps" in str(exc)
+            else:
+                raise AssertionError("a real RWSE width mismatch was accepted")
+        finally:
+            _unstub(saved)
+    print("PASS  test_rwse_width_check_resolves_times_from_times_func")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(list(globals().items())):
         if name.startswith("test_") and callable(fn):

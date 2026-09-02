@@ -174,7 +174,12 @@ def build_graphgym_cfg(run_cfg, graphgps_dir: str):
             # SignNet's encoder for 32 eigenvectors the cache does not have.
             block.eigen.max_freqs = K_LAP
         if posenc_key == "posenc_RWSE":
+            # Set BOTH. master_loader derives `times` from `times_func` during
+            # create_loader(), so times_func is what ultimately governs -- but anything
+            # inspecting the config before then (graphgps_pe_cache.install's width check)
+            # sees an empty `times` unless it is filled in here too. Same value either way.
             block.kernel.times_func = f"range(1,{K_RWSE + 1})"
+            block.kernel.times = list(range(1, K_RWSE + 1))
     cfg.dataset.node_encoder_name = node_enc
 
     cfg.seed = run_cfg.seed
