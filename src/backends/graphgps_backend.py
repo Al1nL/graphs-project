@@ -133,6 +133,50 @@ PE_SPEC = {
     "grpe": (None, None, 0),   # attention bias -- no node-feature channels
 }
 
+# The PE encoder HEAD: the small network that maps raw PE values to the dim_pe channels
+# concatenated onto the node features. Distinct from the PE VALUES, which now come from
+# this repo's shared cache (see backends/graphgps_pe_cache) -- this is the learned part,
+# and it is a property of the PE arm, not of the dataset.
+#
+# These MUST be set explicitly. All three of our base configs (peptides-func, -struct,
+# vocsuperpixels) enable only posenc_LapPE, so every other block stays at the bare
+# defaults from GraphGPS's posenc_config.py -- where `model` is the literal string
+# 'none' and `post_layers` is 0. That is not a working configuration for any encoder:
+# RWSE raises "Does not support 'none' encoder model", and SignNet raises "Num layers in
+# rho model has to be positive". Only the lappe arm happened to work, purely because the
+# base YAML it inherited from configures LapPE for its own use.
+#
+# Values follow GraphGPS's own reference configs for each PE (Linear+BatchNorm for RWSE,
+# consistent across every *-GPS+RWSE.yaml; DeepSet for LapPE as in the peptides configs;
+# the SNDS DeepSet variant for SignNet, which is the one the GPS paper reports). Pinning
+# them here rather than per dataset is deliberate: the grid varies PE and dataset
+# independently, so an encoder head that changed with the dataset would confound the
+# comparison this project exists to make.
+PE_ENCODER = {
+    "lappe": {
+        "model": "DeepSet",
+        "layers": 2,          # layers in the DeepSet phi
+        "post_layers": 0,     # LapPE allows 0 here; SignNet does not
+        "raw_norm_type": "none",
+    },
+    "rwse": {
+        "model": "Linear",    # a single nn.Linear(num_rw_steps -> dim_pe)
+        "layers": 3,          # unused while model is Linear; set so it is not a surprise
+        "post_layers": 0,
+        "raw_norm_type": "BatchNorm",   # RWSE landing probabilities need it; they are
+                                        # raw probabilities with very different scales
+                                        # across walk lengths
+    },
+    "signnet": {
+        "model": "DeepSet",   # the SNDS variant
+        "layers": 8,          # layers in phi
+        "post_layers": 3,     # layers in rho -- MUST be >= 1 or SignNet refuses
+        "raw_norm_type": "none",
+        "phi_hidden_dim": 64,
+        "phi_out_dim": 64,
+    },
+}
+
 
 def build_graphgym_cfg(run_cfg, graphgps_dir: str):
     """Populate GraphGym's global cfg for one grid cell.
@@ -180,6 +224,17 @@ def build_graphgym_cfg(run_cfg, graphgps_dir: str):
             # sees an empty `times` unless it is filled in here too. Same value either way.
             block.kernel.times_func = f"range(1,{K_RWSE + 1})"
             block.kernel.times = list(range(1, K_RWSE + 1))
+
+        # The encoder head. hasattr-checked rather than set blindly so that a field
+        # renamed upstream fails here, naming the field, instead of silently leaving the
+        # default in place -- which for `model` means a crash deep in the encoder and for
+        # `raw_norm_type` means quietly training without the normalisation.
+        for field, value in PE_ENCODER[run_cfg.pe].items():
+            if not hasattr(block, field):
+                raise AttributeError(
+                    f"{posenc_key} has no field {field!r}; GraphGPS's posenc_config.py "
+                    f"may have changed under config.PINNED_COMMITS['gps']")
+            setattr(block, field, value)
     cfg.dataset.node_encoder_name = node_enc
 
     cfg.seed = run_cfg.seed

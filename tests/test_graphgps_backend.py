@@ -222,6 +222,89 @@ def test_graphgps_train_sets_the_per_run_cfg_fields_before_they_are_read():
         "set_printing() writes to cfg.run_dir/logging.log and must follow the assignment")
 
 
+def test_every_pe_with_an_encoder_declares_a_working_head():
+    """Each PE that contributes node channels must pin its own encoder head.
+
+    Regression test for a live cluster failure: `ValueError: RWSENodeEncoder: Does not
+    support 'none' encoder model`, raised from create_model after the dataset build and
+    the ~2 min PE pre-transform. All three base configs enable only posenc_LapPE, so every
+    other PE block sat at GraphGPS's defaults, where model is the literal string 'none'.
+    The lappe arm worked only because it inherited a block the base YAML configures for
+    its own use -- so 'it ran once' was never evidence the other arms would.
+    """
+    for pe, (enc_suffix, _key, _dim) in graphgps_backend.PE_SPEC.items():
+        if enc_suffix is None:          # 'none' and 'grpe' add no node channels
+            assert pe not in graphgps_backend.PE_ENCODER, (
+                f"{pe} has no PE encoder but declares an encoder head")
+            continue
+        assert pe in graphgps_backend.PE_ENCODER, (
+            f"{pe} has encoder {enc_suffix} but no entry in PE_ENCODER, so it would run "
+            f"with GraphGPS's defaults -- model='none', which no encoder accepts")
+        head = graphgps_backend.PE_ENCODER[pe]
+        assert head.get("model", "none") != "none"
+        assert "raw_norm_type" in head, (
+            f"{pe} does not pin raw_norm_type; the default 'none' would silently train "
+            f"without normalisation rather than failing")
+
+
+def test_pe_encoder_models_are_spelled_as_each_encoder_expects():
+    """The three encoders validate `model` differently, and two of them are
+    case-sensitive, so the string has to match exactly:
+
+      RWSE      lowercases first, then requires 'linear' or 'mlp' -- else ValueError
+      SignNet   `if model_type not in ['MLP', 'DeepSet']` -- case-sensitive ValueError
+      LapPE     `if model_type == 'Transformer': ... else: <DeepSet>` -- accepts ANYTHING
+                as DeepSet, so a typo here would build a silently different encoder
+                rather than raising. That last one is why this test checks LapPE too.
+    """
+    assert graphgps_backend.PE_ENCODER["rwse"]["model"].lower() in ("linear", "mlp")
+    assert graphgps_backend.PE_ENCODER["signnet"]["model"] in ("MLP", "DeepSet")
+    assert graphgps_backend.PE_ENCODER["lappe"]["model"] in ("Transformer", "DeepSet")
+
+
+def test_signnet_rho_depth_is_positive():
+    """SignNet raises "Num layers in rho model has to be positive" for post_layers < 1,
+    and the GraphGPS default is 0 -- so the signnet arm was broken too, just with a
+    different exception than the one RWSE hit first."""
+    assert graphgps_backend.PE_ENCODER["signnet"]["post_layers"] >= 1
+
+
+def test_build_graphgym_cfg_actually_applies_the_encoder_head():
+    """Declaring PE_ENCODER is only half of it -- build_graphgym_cfg has to read it.
+
+    Checked on the source because build_graphgym_cfg needs the GraphGPS clone (for the
+    base YAML, and because cfg.posenc_RWSE only exists once GraphGPS registers it), which
+    this suite runs without by design. Without this, PE_ENCODER could be dropped from
+    build_graphgym_cfg entirely and every other test in this file would still pass while
+    the RWSE arm went back to crashing on the cluster.
+    """
+    import ast
+
+    src = os.path.join(os.path.dirname(__file__), "..", "src", "backends",
+                       "graphgps_backend.py")
+    with open(src, encoding="utf-8") as f:
+        tree = ast.parse(f.read())
+
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "build_graphgym_cfg")
+    names = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)}
+    assert "PE_ENCODER" in names, (
+        "build_graphgym_cfg never reads PE_ENCODER, so the PE blocks keep GraphGPS's "
+        "defaults (model='none') no matter what PE_ENCODER says")
+
+
+def test_encoder_heads_do_not_vary_by_dataset():
+    """PE_ENCODER is keyed by PE alone, and must stay that way. The grid varies PE and
+    dataset independently; an encoder head that changed with the dataset would confound
+    exactly the cross-dataset comparison this project is built to make."""
+    from config import PES
+
+    assert set(graphgps_backend.PE_ENCODER) <= set(PES)
+    for head in graphgps_backend.PE_ENCODER.values():
+        assert not any(d in head for d in graphgps_backend.BASE_CONFIG), (
+            "a PE encoder head is being specialised per dataset")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
