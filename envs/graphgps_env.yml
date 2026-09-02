@@ -58,11 +58,26 @@ dependencies:
   - pytorch-mutex=1.0=cuda
   - pyg=2.2
 
-  # torch-scatter is pulled in by the `pyg` metapackage, but named explicitly because our
-  # import path depends on it directly and not incidentally: graphgps/encoder/
-  # signnet_pos_encoder.py and layer/gatedgcn_layer.py both `from torch_scatter import
-  # scatter` at module level, so `import graphgps` fails outright without it.
+  # The pyg 2.2 companion libraries, named EXPLICITLY rather than left to the `pyg`
+  # metapackage to drag in. Leaving them implicit is not theoretical: a real install of an
+  # earlier version of this file resolved without torch_sparse, and the failure is about as
+  # far from the cause as it gets --
+  #
+  #     >>> import graphgps
+  #     File ".../torch_geometric/data/data.py", line 20, in <module>
+  #         from torch_sparse import SparseTensor
+  #     ModuleNotFoundError: No module named 'torch_sparse'
+  #
+  # PyG 2.2 imports torch_sparse at MODULE level in data.py, so without it
+  # `import torch_geometric` fails outright -- nothing in this project can run, and the
+  # traceback points at graphgps, which is not where the problem is.
+  #
+  # torch_scatter is separately load-bearing on our own import path:
+  # graphgps/encoder/signnet_pos_encoder.py and layer/gatedgcn_layer.py both do
+  # `from torch_scatter import scatter` at module level.
+  - pytorch-sparse
   - pytorch-scatter
+  - pytorch-cluster
 
   - fsspec
 
