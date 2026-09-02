@@ -305,6 +305,45 @@ def test_encoder_heads_do_not_vary_by_dataset():
             "a PE encoder head is being specialised per dataset")
 
 
+def test_build_graphgym_cfg_runs_graphgyms_config_post_processing():
+    """build_graphgym_cfg must call assert_cfg, which is not optional validation.
+
+    main.py never calls it directly -- it arrives via load_cfg(), which is
+    merge_from_file + merge_from_list + assert_cfg. Replicating only the merge, as this
+    backend did, silently skips a set of REWRITES that despite the function's name are
+    part of building a usable config:
+
+        gnn.head 'default' -> cfg.dataset.task   (a sentinel; nothing registers 'default',
+                                                  so it fails at model construction with
+                                                  KeyError: 'default')
+        model.loss_fun      coerced by task_type
+        gnn.layers_post_mp  raised to >= 1
+        dataset.transductive forced False for graph tasks
+
+    Only the first one raises. The others would have quietly trained a slightly different
+    model than the reference config describes, which is worse.
+    """
+    import ast
+
+    src = os.path.join(os.path.dirname(__file__), "..", "src", "backends",
+                       "graphgps_backend.py")
+    with open(src, encoding="utf-8") as f:
+        tree = ast.parse(f.read())
+
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "build_graphgym_cfg")
+    called = {n.func.id for n in ast.walk(fn)
+              if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+
+    assert "assert_cfg" in called, (
+        "build_graphgym_cfg merges the base config but never calls assert_cfg, so "
+        "GraphGym's post-processing never runs -- starting with gnn.head, which stays at "
+        "the unregistered sentinel 'default'")
+    assert "set_cfg" in called, (
+        "build_graphgym_cfg must reset the global cfg before merging; it is a singleton "
+        "and a previous cell's values would otherwise leak into this one")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

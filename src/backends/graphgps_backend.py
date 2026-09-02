@@ -185,7 +185,7 @@ def build_graphgym_cfg(run_cfg, graphgps_dir: str):
     cells cannot be configured concurrently in one process. The launcher runs cells
     sequentially, which is why that is acceptable here.
     """
-    from torch_geometric.graphgym.config import cfg, set_cfg
+    from torch_geometric.graphgym.config import assert_cfg, cfg, set_cfg
 
     set_cfg(cfg)
     base = os.path.join(graphgps_dir, BASE_CONFIG[run_cfg.dataset])
@@ -264,6 +264,32 @@ def build_graphgym_cfg(run_cfg, graphgps_dir: str):
     # checkpoint has reached max_epoch does NOT retrain -- custom_train logs "Checkpoint
     # found, Task already done" and skips to evaluation. That is what makes requeue work,
     # but it also means a deliberate retrain needs cfg.out_dir cleared first.
+
+    # --- the post-processing main.py gets for free from load_cfg --------------------------
+    # main.py reads its config through load_cfg(), which is merge_from_file +
+    # merge_from_list + assert_cfg. We replicate the merge and, until this call, skipped
+    # the rest. Despite the name assert_cfg does not only assert -- it REWRITES values,
+    # and one of those rewrites is load-bearing:
+    #
+    #   gnn.head 'default' -> cfg.dataset.task
+    #       'default' is a SENTINEL, not a registered head. Nothing registers it, in PyG
+    #       or in GraphGPS, so leaving it in place fails at model construction with
+    #       `KeyError: 'default'` from gps_model's register.head_dict lookup. 22 of
+    #       GraphGPS's own configs use it, including all three of ours.
+    #   loss_fun  coerced to cross_entropy for classification / mse for regression
+    #   layers_post_mp  raised to >= 1
+    #   dataset.transductive  forced False for graph-level tasks
+    #
+    # Called last so it sees the PE and encoder edits above, mirroring load_cfg's order
+    # (assert_cfg runs after the command-line overrides, which is what those edits are the
+    # analogue of). It also sets cfg.run_dir = cfg.out_dir; graphgps_train overwrites that
+    # with the per-seed directory immediately afterwards, which is what main.py does too.
+    #
+    # Worth knowing that the sentinel would be WRONG for pascalvoc-sp: its config declares
+    # `task: graph` even though VOC is node-level, and pins `head: inductive_node`
+    # explicitly. So this rewrite is correct for the two peptides datasets precisely
+    # because VOC opts out of it.
+    assert_cfg(cfg)
     return cfg
 
 
@@ -319,6 +345,12 @@ def graphgps_train(run_cfg, graphgps_dir: Optional[str] = None) -> dict:
 
     cfg = build_graphgym_cfg(run_cfg, graphgps_dir)
 
+    # Slurm gives a task a CPU allocation; torch otherwise sizes its thread pool from the
+    # machine's total core count and oversubscribes it, which on a shared cluster slows
+    # down both this job and its neighbours. main.py sets this for the same reason.
+    import torch
+    torch.set_num_threads(cfg.num_threads)
+
     # --- per-run state main.py sets inside its run loop ---------------------------------
     # build_graphgym_cfg cannot set these: they belong to one iteration of the loop over
     # seeds, not to the config, and main.py accordingly assigns them per iteration
@@ -345,6 +377,14 @@ def graphgps_train(run_cfg, graphgps_dir: Optional[str] = None) -> dict:
     # It also writes cfg.run_dir/logging.log. Called before create_loader so the loader's
     # own dataset/PE messages are captured too, matching main.py's order.
     set_printing()
+
+    # Provenance: the fully resolved config this cell actually trained on, post-merge and
+    # post-assert_cfg. main.py dumps this to cfg.out_dir; we write it to cfg.run_dir
+    # instead, because out_dir is shared by every seed of a cell and the Slurm array runs
+    # several of them at once -- concurrent writes to one config.yaml would interleave.
+    # Per-seed is also the more useful record, since cfg.seed is part of what it captures.
+    with open(os.path.join(cfg.run_dir, "config.yaml"), "w") as f:
+        cfg.dump(stream=f)
 
     seed_everything(cfg.seed)
     auto_select_device()
