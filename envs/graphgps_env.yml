@@ -119,9 +119,34 @@ dependencies:
 
       # performer-pytorch is NOT optional despite GPS not using Performer attention by
       # default: graphgps/layer/gps_layer.py imports SelfAttention from it at module
-      # level, so it is required just to import the package. It brings einops,
-      # axial-positional-embedding and local-attention with it.
-      - performer-pytorch
+      # level, so it is required just to import the package.
+      #
+      # ITS TRANSITIVE DEPS MUST BE PINNED, AND THIS IS THE SUBTLEST TRAP IN THIS FILE.
+      # performer-pytorch 1.1.4 itself only asks for torch>=1.6, which conda's 1.13.1
+      # satisfies. But it depends on axial-positional-embedding and local-attention
+      # UNBOUNDED, and current releases of both require torch>=2.0. pip resolves them to
+      # latest, sees the constraint unmet, and satisfies it the only way it can: by
+      # installing a PyPI torch OVER conda's, replacing the CUDA 1.13.1 build with 2.13.0.
+      #
+      # Nothing errors during the install. It surfaces later as:
+      #
+      #     OSError: .../torch_sparse/_version_cuda.so: undefined symbol:
+      #     _ZN3c1017RegisterOperatorsD1Ev
+      #
+      # -- i.e. c10::RegisterOperators::~RegisterOperators(), a libtorch ABI symbol that
+      # exists in 1.13 and not in 2.x. Every conda companion library (pyg, sparse,
+      # scatter, cluster) is compiled against 1.13 and none can load. `conda list` shows
+      # the giveaway: `torch 2.13.0 pypi_0 pypi` sitting next to `pytorch-sparse
+      # ..._torch_1.13.0_cu117 pyg`.
+      #
+      # Versions below verified against their published metadata: local-attention 1.4.4
+      # requires plain `torch` with no floor, axial-positional-embedding 0.2.1 and einops
+      # 0.6.1 declare no dependencies at all, and all three satisfy performer-pytorch's
+      # own minimums (>=1.1.1, >=0.1.0, >=0.3). Do not relax these to ranges.
+      - einops==0.6.1
+      - axial-positional-embedding==0.2.1
+      - local-attention==1.4.4
+      - performer-pytorch==1.1.4
 
       # Imported at module scope by graphgps/logger.py. cfg.wandb.use is forced False in
       # backends/graphgps_backend.py (the launcher owns logging), but the import still has
