@@ -122,7 +122,17 @@ dependencies:
   # --- shared-harness deps (src/pe, src/sensitivity.py, src/run_experiment.py). The probe
   # runs in THIS env, in-process against the trained model, so they belong here and not
   # only in requirements.txt.
-  - numpy
+  # NUMPY MUST STAY BELOW 2. pytorch 1.13 is compiled against the NumPy 1.x C API, and
+  # under NumPy 2 its interop layer fails to initialise:
+  #
+  #     UserWarning: Failed to initialize NumPy: _ARRAY_API not found
+  #     A module that was compiled using NumPy 1.x cannot be run in NumPy 2.2.6
+  #
+  # `import torch` still SUCCEEDS, which is what makes this dangerous -- it degrades
+  # rather than fails. torch.from_numpy() and Tensor.numpy() are what break, and
+  # backends/graphgps_pe_cache.py calls torch.from_numpy on every graph it feeds to
+  # GraphGPS, so the PE injection is directly downstream of this.
+  - numpy<2
   - scipy
   - networkx
   - pandas
