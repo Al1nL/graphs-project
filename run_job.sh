@@ -18,6 +18,10 @@ export DGLBACKEND=pytorch
 export DGL_HOME=/home/yandex/MLWG2026/liorpernik/tmp/.dgl
 mkdir -p /home/yandex/MLWG2026/liorpernik/tmp/.dgl
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export OMP_NUM_THREADS=4
+export MKL_NUM_THREADS=4
+export OPENBLAS_NUM_THREADS=4
+export NUMEXPR_NUM_THREADS=4
 export PYTHONPATH=/home/yandex/MLWG2026/alinl/SAN:/home/yandex/MLWG2026/liorpernik/graphs-project:$PYTHONPATH
 
 cd /home/yandex/MLWG2026/liorpernik/graphs-project
