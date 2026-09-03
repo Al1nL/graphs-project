@@ -580,16 +580,24 @@ def unwrap_graphgym_module(model):
     probe does notice: it reaches into named_children() to run the encoder separately and
     replay the layer stack, and on the wrapper that yields ['model'] and nothing else.
 
-    Unwraps by looking for the encoder rather than by isinstance, so it does not need to
-    import Lightning, and so it is a no-op when handed an already-unwrapped GPSModel (as
-    the tests do). Bounded rather than `while True` -- a wrapper whose `.model` is itself
-    would otherwise hang instead of raising.
+    Decided on named_children(), NOT hasattr/getattr. GraphGymModule forwards `encoder`,
+    `mp` and `post_mp` as @property to the network inside it, so every attribute-level
+    test for "is this the real model?" answers yes on the wrapper too -- that forwarding
+    is the whole point of the wrapper. Registered submodules do not lie the same way: a
+    property is not a submodule, so named_children() on the wrapper is exactly ['model']
+    while the real network's is ['encoder', ..., 'post_mp']. This is also what the probe
+    itself walks, so the check tests the same thing the caller depends on.
+
+    Uses no isinstance check, so it needs no Lightning import, and is a no-op on an
+    already-unwrapped GPSModel. Bounded rather than `while True` -- a wrapper whose
+    `.model` is itself would otherwise hang instead of raising.
     """
     for _ in range(4):
-        if hasattr(model, "encoder"):
+        children = dict(model.named_children())
+        if "encoder" in children:
             return model
-        inner = getattr(model, "model", None)
-        if not isinstance(inner, torch.nn.Module) or inner is model:
+        inner = children.get("model")
+        if inner is None or inner is model:
             return model
         model = inner
     return model

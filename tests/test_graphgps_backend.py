@@ -443,12 +443,37 @@ def test_unwrap_finds_the_network_inside_the_lightning_wrapper():
             self.post_mp = torch.nn.Linear(2, 2)
 
     class _GraphGymModule(torch.nn.Module):
+        """Mirrors torch_geometric.graphgym.model_builder.GraphGymModule.
+
+        The forwarding properties are the point of this fixture, not decoration. The
+        first version of unwrap_graphgym_module tested `hasattr(model, "encoder")` and
+        this test passed, because the fake wrapper did not have them -- while on the real
+        wrapper hasattr answered True and the unwrap returned the wrapper unchanged. A
+        wrapper that is transparent at the attribute level is exactly what has to be seen
+        through here, so the fixture has to be transparent too.
+        """
+
         def __init__(self, inner):
             super().__init__()
             self.model = inner
 
+        @property
+        def encoder(self):
+            return self.model.encoder
+
+        @property
+        def post_mp(self):
+            return self.model.post_mp
+
     net = _GPSModel()
-    assert graphgps_backend.unwrap_graphgym_module(_GraphGymModule(net)) is net
+    wrapper = _GraphGymModule(net)
+
+    # the wrapper is transparent at the attribute level -- this is why hasattr cannot be
+    # used to tell the two apart, and the assertion that pins the actual bug
+    assert hasattr(wrapper, "encoder")
+    assert [n for n, _ in wrapper.named_children()] == ["model"]
+
+    assert graphgps_backend.unwrap_graphgym_module(wrapper) is net
 
     # idempotent: an already-unwrapped network passes straight through
     assert graphgps_backend.unwrap_graphgym_module(net) is net
