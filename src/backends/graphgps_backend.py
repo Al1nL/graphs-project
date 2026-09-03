@@ -625,6 +625,20 @@ def make_gps_model_fn(model, data, device=None):
     device = device or next(model.parameters()).device
     batch = data.clone().to(device)
 
+    # The probe hands over ONE graph, so `.batch` is None -- there was no DataLoader to
+    # build it. Most of the stack tolerates that: to_dense_batch, which GPS's attention
+    # uses, creates the zeros itself when handed None. SignNet's sign-invariant net does
+    # not; batched_n_nodes calls batch_index.max() and dies with `'NoneType' object has
+    # no attribute 'max'`. It needs the node counts to mask eigenvector columns beyond
+    # each graph's size, the same padding concern lap_to_graphgps handles on our side.
+    #
+    # Setting it explicitly is not a SignNet workaround: a single graph genuinely IS a
+    # batch of one, and saying so beats depending on every downstream op to guess. For
+    # the arms that already worked this changes nothing -- they were getting these same
+    # zeros, just constructed further down.
+    if getattr(batch, "batch", None) is None:
+        batch.batch = torch.zeros(int(batch.num_nodes), dtype=torch.long, device=device)
+
     children = list(model.named_children())
     if not children or children[0][0] != "encoder":
         raise RuntimeError(

@@ -532,6 +532,71 @@ def test_smoke_test_does_not_resume_or_checkpoint_into_the_real_cell():
         assert field in body, f"smoke_test does not override {field}: {why}"
 
 
+def test_probe_gives_the_encoder_a_batch_vector_for_its_single_graph():
+    """The probe passes one Data object, so `.batch` is None until we set it.
+
+    Regression test for `AttributeError: 'NoneType' object has no attribute 'max'` from
+    SignNet's batched_n_nodes during the probe. Only the signnet arm hit it: GPS's
+    attention goes through to_dense_batch, which builds the zeros itself when handed
+    None, so rwse/lappe/none all passed while signnet crashed on the same input.
+
+    Verified functionally rather than by AST, with a stub model, since the assertion is
+    about what the encoder actually receives.
+    """
+    import torch
+
+    seen = []
+
+    class _Encoder(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.lin = torch.nn.Linear(3, 3)
+
+        def forward(self, b):
+            seen.append(b.batch)
+            b.x = self.lin(b.x)
+            return b
+
+    class _Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.encoder = _Encoder()
+            self.layers = torch.nn.Identity()
+            self.post_mp = torch.nn.Linear(3, 3)
+
+    class _Data:
+        """Minimal stand-in for a PyG Data: .batch reads as None when never assigned."""
+
+        def __init__(self, x, edge_index):
+            self.x = x
+            self.edge_index = edge_index
+            self.num_nodes = x.shape[0]
+            self.batch = None
+
+        def clone(self):
+            d = _Data(self.x.clone(), self.edge_index.clone())
+            d.batch = None if self.batch is None else self.batch.clone()
+            return d
+
+        def to(self, device):
+            return self
+
+    data = _Data(torch.randn(5, 3), torch.tensor([[0, 1, 2, 3], [1, 2, 3, 4]]))
+    assert data.batch is None
+
+    original = graphgps_backend.probe_widths
+    graphgps_backend.probe_widths = lambda model: {"dim_inner": 3}
+    try:
+        graphgps_backend.make_gps_model_fn(_Model(), data)
+    finally:
+        graphgps_backend.probe_widths = original
+
+    assert seen and seen[0] is not None, (
+        "the encoder was handed batch=None; SignNet's batched_n_nodes calls .max() on it")
+    assert torch.equal(seen[0], torch.zeros(5, dtype=torch.long)), (
+        "one graph is a batch of one -- every node must map to graph 0")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
