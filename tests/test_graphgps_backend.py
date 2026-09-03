@@ -425,6 +425,88 @@ def test_smoke_test_forces_one_epoch_and_drops_the_warmup():
         "smoke_test does not drop the warmup, so its single epoch would train at LR 0")
 
 
+def test_unwrap_finds_the_network_inside_the_lightning_wrapper():
+    """create_model() returns a GraphGymModule, not the GPSModel.
+
+    Regression test for a live failure: `unexpected GPSModel layout ['model']; expected
+    'encoder' first`. GraphGPS's own training loop never notices the wrapper, because it
+    only calls forward. The probe does -- it walks named_children() to run the encoder
+    separately and replay the layer stack -- so it was handed a module whose only child
+    is the network it actually wanted.
+    """
+    import torch
+
+    class _GPSModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.encoder = torch.nn.Linear(2, 2)
+            self.post_mp = torch.nn.Linear(2, 2)
+
+    class _GraphGymModule(torch.nn.Module):
+        def __init__(self, inner):
+            super().__init__()
+            self.model = inner
+
+    net = _GPSModel()
+    assert graphgps_backend.unwrap_graphgym_module(_GraphGymModule(net)) is net
+
+    # idempotent: an already-unwrapped network passes straight through
+    assert graphgps_backend.unwrap_graphgym_module(net) is net
+
+    # nested wrappers unwrap all the way down
+    assert graphgps_backend.unwrap_graphgym_module(
+        _GraphGymModule(_GraphGymModule(net))) is net
+
+
+def test_unwrap_terminates_on_a_self_referential_wrapper():
+    """Bounded rather than `while True`: a module whose .model is itself must return,
+    not hang. A test process that hangs gives far less information than one that fails."""
+    import torch
+
+    class _Loop(torch.nn.Module):
+        @property
+        def model(self):
+            return self
+
+    loop = _Loop()
+    assert graphgps_backend.unwrap_graphgym_module(loop) is loop
+
+
+def test_smoke_test_does_not_resume_or_checkpoint_into_the_real_cell():
+    """Checked on the source; build_graphgym_cfg needs the GraphGPS clone.
+
+    Regression test for a smoke test that silently trained NOTHING. custom_train does
+    `for cur_epoch in range(start_epoch, max_epoch)`, and with auto_resume on, a stale
+    checkpoint gave start_epoch 170 against the smoke test's max_epoch 1 -- an empty
+    range. It logged "Task done", reported "Avg time per epoch: nan", and handed the
+    probe a model it had never trained.
+
+    The other two settings protect the real run rather than the smoke test: ckpt_period
+    always checkpoints the final epoch, so a smoke test sharing the cell's run_dir would
+    leave an epoch-0 checkpoint that the next real run would silently resume from -- a
+    200-epoch cell quietly continuing from a model trained on two batches.
+    """
+    import ast
+
+    src = os.path.join(os.path.dirname(__file__), "..", "src", "backends",
+                       "graphgps_backend.py")
+    with open(src, encoding="utf-8") as f:
+        tree = ast.parse(f.read())
+
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "build_graphgym_cfg")
+    guarded = [n for n in ast.walk(fn)
+               if isinstance(n, ast.If) and "smoke_test" in ast.dump(n.test)]
+    assert guarded, "build_graphgym_cfg does not branch on smoke_test"
+
+    body = "\n".join(ast.dump(n) for n in guarded)
+    for field, why in (
+            ("auto_resume", "a stale checkpoint would make the smoke test train nothing"),
+            ("enable_ckpt", "the smoke test would leave a checkpoint the real run resumes"),
+            ("out_dir", "the smoke test would write into the real cell's directory")):
+        assert field in body, f"smoke_test does not override {field}: {why}"
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

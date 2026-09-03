@@ -241,15 +241,6 @@ def build_graphgym_cfg(run_cfg, graphgps_dir: str):
     cfg.out_dir = os.path.join(run_cfg.results_dir, "raw", run_cfg.run_id)
     if run_cfg.epochs is not None:
         cfg.optim.max_epoch = run_cfg.epochs
-    if getattr(run_cfg, "smoke_test", False):
-        # Last, so it wins over --epochs, matching san_backend.
-        cfg.optim.max_epoch = 1
-        # The reference schedule is cosine_with_warmup over 10 warmup epochs. At
-        # max_epoch 1 the warmup never completes, so the LR stays at 0 for the whole run
-        # and the loss cannot move -- a smoke test that reports a suspiciously flat curve
-        # for a reason that has nothing to do with the model. Shape-checking does not need
-        # a schedule; drop the warmup so the one epoch trains at the base LR.
-        cfg.optim.num_warmup_epochs = 0
     cfg.train.mode = "custom"          # GraphGPS's own loop; 'standard' needs lightning
     cfg.wandb.use = False              # the launcher owns logging
 
@@ -268,6 +259,31 @@ def build_graphgym_cfg(run_cfg, graphgps_dir: str):
     # would lose 99 epochs. 10 caps the loss at 10 epochs for a model small enough that
     # 20-30 checkpoints is tens of MB, not a quota problem.
     cfg.train.ckpt_period = 10
+
+    # --- smoke test: one epoch, its own directory, no resume -----------------------------
+    # Placed after the checkpoint settings above so it overrides them, and after the
+    # --epochs override so it wins over that too (matching san_backend).
+    if getattr(run_cfg, "smoke_test", False):
+        cfg.optim.max_epoch = 1
+        # The reference schedule is cosine_with_warmup over 5-10 warmup epochs. At
+        # max_epoch 1 the warmup never completes, so the LR stays at 0 for the whole run
+        # and the loss cannot move -- a flat curve for a reason that has nothing to do
+        # with the model. Shape-checking needs no schedule; train the one epoch at base LR.
+        cfg.optim.num_warmup_epochs = 0
+
+        # auto_resume OFF. custom_train does `for cur_epoch in range(start_epoch,
+        # max_epoch)`, so ANY existing checkpoint makes range(start, 1) empty and the
+        # smoke test silently trains nothing at all -- it logs "Task done", reports
+        # "Avg time per epoch: nan", and hands the probe a model it never touched. A
+        # smoke test that skips the thing it is testing is worse than no smoke test.
+        cfg.train.auto_resume = False
+        # enable_ckpt OFF, and a directory of its own. Both protect the REAL run: with
+        # ckpt_period 10 the last epoch is always checkpointed, so a smoke test would
+        # otherwise leave an epoch-0 checkpoint in the cell's own run_dir, and the next
+        # real run -- which does resume -- would silently continue from a model trained
+        # on two batches instead of starting clean.
+        cfg.train.enable_ckpt = False
+        cfg.out_dir += "_smoke"
 
     # NOTE the consequence for re-runs: with auto_resume on, re-running a cell whose
     # checkpoint has reached max_epoch does NOT retrain -- custom_train logs "Checkpoint
@@ -412,11 +428,10 @@ def graphgps_train(run_cfg, graphgps_dir: Optional[str] = None) -> dict:
     cfg.run_id = cfg.seed
     cfg.run_dir = run_dir_for(cfg.out_dir, cfg.seed)
     # main.py's custom_set_run_dir branches here on cfg.train.auto_resume and calls
-    # makedirs_rm_exist -- i.e. DELETES the run directory -- when it is False. We force
-    # auto_resume True (see build_graphgym_cfg), so only the exist_ok branch is reachable;
-    # inlining it keeps a destructive path that can never be wanted here out of the code
-    # entirely, rather than leaving it one config edit away from wiping a cell's
-    # checkpoints and stats.
+    # makedirs_rm_exist -- i.e. DELETES the run directory -- when it is False. Inlining
+    # only the exist_ok branch keeps that destructive path out of the code entirely. That
+    # is no longer merely defensive: --smoke-test deliberately sets auto_resume False, so
+    # upstream's branch WOULD now be reached, and a smoke test would wipe a directory.
     os.makedirs(cfg.run_dir, exist_ok=True)
     # Without this, GraphGPS is SILENT: it reports epoch stats through logging.info, and
     # an unconfigured root logger defaults to WARNING, so every epoch line is discarded.
@@ -556,6 +571,30 @@ def probe_widths(model) -> dict:
             "n_content_feats": cfg.gnn.dim_inner - dim_pe}
 
 
+def unwrap_graphgym_module(model):
+    """Return the GPSModel inside whatever create_model() handed back.
+
+    torch_geometric.graphgym.create_model returns a GraphGymModule -- a Lightning wrapper
+    holding the real network as `.model` -- not the network itself. GraphGPS's own
+    training loop never notices, because it only ever calls the wrapper's forward. The
+    probe does notice: it reaches into named_children() to run the encoder separately and
+    replay the layer stack, and on the wrapper that yields ['model'] and nothing else.
+
+    Unwraps by looking for the encoder rather than by isinstance, so it does not need to
+    import Lightning, and so it is a no-op when handed an already-unwrapped GPSModel (as
+    the tests do). Bounded rather than `while True` -- a wrapper whose `.model` is itself
+    would otherwise hang instead of raising.
+    """
+    for _ in range(4):
+        if hasattr(model, "encoder"):
+            return model
+        inner = getattr(model, "model", None)
+        if not isinstance(inner, torch.nn.Module) or inner is model:
+            return model
+        model = inner
+    return model
+
+
 def make_gps_model_fn(model, data, device=None):
     """Wrap a trained GPSModel for `sensitivity.compute_sensitivity_curve`.
 
@@ -572,6 +611,7 @@ def make_gps_model_fn(model, data, device=None):
     and post_mp on whatever `x` the probe hands back. Stopping before post_mp is what
     yields node embeddings rather than pooled graph logits.
     """
+    model = unwrap_graphgym_module(model)
     model.eval()   # BatchNorm must use running stats: training-mode batch statistics would
                    # make the Jacobian depend on the rest of the batch, not just node u
     device = device or next(model.parameters()).device
