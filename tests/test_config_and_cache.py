@@ -397,6 +397,37 @@ def test_raw_dir_is_passed_through_to_the_dataset_loader():
         shutil.rmtree(out, ignore_errors=True)
 
 
+def test_smoke_test_shrinks_the_probe_not_just_the_training():
+    """--smoke-test truncated training but left the probe at PROBE_N_GRAPHS = 256.
+
+    Regression test for a run that looked hung. Training finished in 1.8s and the probe
+    then ran silently for an unbounded time: the probe costs
+    len(graphs) x num_target_nodes x dim_inner backward passes through the whole layer
+    stack, so 256 graphs x 32 targets x 96 is on the order of 10^5-10^6 of them. A smoke
+    test whose cheap part is 2 batches and whose expensive part is untouched is not a
+    smoke test.
+    """
+    from config import PROBE_N_GRAPHS, SMOKE_TEST_PROBE_GRAPHS, RunConfig
+
+    assert SMOKE_TEST_PROBE_GRAPHS < PROBE_N_GRAPHS
+
+    normal = RunConfig("gps", "rwse", "peptides-func", 0)
+    assert normal.resolved_num_probe_graphs() == PROBE_N_GRAPHS
+
+    smoke = RunConfig("gps", "rwse", "peptides-func", 0, smoke_test=True)
+    assert smoke.resolved_num_probe_graphs() == SMOKE_TEST_PROBE_GRAPHS
+
+    # smoke_test wins over an explicit count, as it does for epochs -- otherwise a
+    # --num-probe-graphs left over from another command silently un-smokes the run
+    explicit = RunConfig("gps", "rwse", "peptides-func", 0,
+                         num_probe_graphs=256, smoke_test=True)
+    assert explicit.resolved_num_probe_graphs() == SMOKE_TEST_PROBE_GRAPHS
+
+    # and without the flag an explicit count is still honoured
+    assert RunConfig("gps", "rwse", "peptides-func", 0,
+                     num_probe_graphs=8).resolved_num_probe_graphs() == 8
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

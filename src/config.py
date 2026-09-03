@@ -56,6 +56,12 @@ TASK_METRIC = {
 # grid cell probes once T is already chosen.
 PROBE_N_GRAPHS = 256
 
+# Graphs probed under --smoke-test. The probe is the most expensive thing in a cell by a
+# wide margin -- PROBE_N_GRAPHS graphs x num_target_nodes targets x dim_inner basis
+# vectors backward passes -- so leaving it at 256 made a "smoke test" run for tens of
+# minutes AFTER training finished in two seconds, with no output, looking hung.
+SMOKE_TEST_PROBE_GRAPHS = 2
+
 # --------------------------------------------------------------------------- versions
 # Bump whenever src/pe/compute_pe.py changes what it writes. The cache manifest records
 # this, and PECache refuses to load a cache whose version differs -- a stale cache is
@@ -291,6 +297,11 @@ class RunConfig:
         return max_dist(self.dataset)
 
     def resolved_num_probe_graphs(self) -> int:
+        # smoke_test wins over an explicit num_probe_graphs, the same way it wins over
+        # an explicit epochs -- "check the wiring cheaply" is the whole point of the flag,
+        # and a smoke test that probes 256 graphs is not cheap.
+        if self.smoke_test:
+            return SMOKE_TEST_PROBE_GRAPHS
         return self.num_probe_graphs if self.num_probe_graphs is not None else PROBE_N_GRAPHS
 
     def to_dict(self) -> dict:

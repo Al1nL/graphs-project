@@ -209,12 +209,25 @@ def run_probe(trained_model, backbone: str, test_dataset, run_cfg) -> dict:
     should skip this entirely rather than call it -- it raises NotImplementedError via
     make_model_fn otherwise, which is correct but not a useful way to find that out.
     """
+    import time
+
     graphs = sample_test_graphs(test_dataset, run_cfg.resolved_num_probe_graphs(),
                                  run_cfg.seed)
     max_dist = run_cfg.resolved_max_dist()
     per_graph = []
     n_shared_feats_used = None
-    for graph_id, data in graphs:
+
+    # The probe is by far the most expensive part of a cell, and it used to run silently:
+    # one Jacobian per (graph, target node) means len(graphs) x num_target_nodes x
+    # dim_inner backward passes through the full layer stack, which is tens of minutes on
+    # a real grid cell. Without output that is indistinguishable from a hang -- and the
+    # natural response to an apparent hang is to kill the job, losing the training too.
+    print(f"  probe: {len(graphs)} graphs x {run_cfg.num_target_nodes} target nodes, "
+          f"max_dist={max_dist}", flush=True)
+    t0 = time.time()
+    report_every = max(1, len(graphs) // 20)
+
+    for i, (graph_id, data) in enumerate(graphs):
         model_fn, probe_data, meta = make_model_fn(trained_model, backbone, data)
         if n_shared_feats_used is None:
             # RECOMMENDATION from graphgps_backend.probe_widths(): use dim_inner, the width
@@ -229,6 +242,13 @@ def run_probe(trained_model, backbone: str, test_dataset, run_cfg) -> dict:
         diam = graph_diameter(probe_data.edge_index, probe_data.num_nodes)
         per_graph.append({"graph_id": int(graph_id), "curve": curve,
                           "diameter": diam, "num_nodes": int(probe_data.num_nodes)})
+
+        done = i + 1
+        if done % report_every == 0 or done == len(graphs):
+            elapsed = time.time() - t0
+            remaining = elapsed / done * (len(graphs) - done)
+            print(f"  probe: {done}/{len(graphs)} graphs, {elapsed:.0f}s elapsed, "
+                  f"~{remaining:.0f}s remaining", flush=True)
     return {
         "pooled_curve": average_curves([r["curve"] for r in per_graph]),
         "per_graph": per_graph,
