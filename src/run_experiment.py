@@ -277,6 +277,10 @@ def run_cell(run_cfg: RunConfig) -> dict:
         "backbone": run_cfg.backbone, "pe": run_cfg.pe, "dataset": run_cfg.dataset,
         "seed": run_cfg.seed, "metric_name": run_cfg.metric_name,
         "config_hash": run_cfg.config_hash(),
+        # Stamped on EVERY record, not just smoke ones, so "no field" means "written
+        # before this existed" rather than "definitely a real run". A filename suffix
+        # alone would not survive a copy or a rename; this travels with the data.
+        "smoke_test": bool(run_cfg.smoke_test),
     }
 
     train_out = TRAIN_FN[run_cfg.backbone](run_cfg, run_cfg.dataset, run_cfg.seed)

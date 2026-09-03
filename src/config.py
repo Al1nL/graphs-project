@@ -249,8 +249,14 @@ class RunConfig:
                                               # accumulation_steps for why it's a separate
                                               # axis from batch_size/edge_budget. None ->
                                               # backbone's own default (usually 1, i.e. off).
-    smoke_test: bool = False                 # Run just 2 batches per split to verify shapes,
-                                              # then exit. Implies epochs=1. No result saved.
+    smoke_test: bool = False                 # Verify the wiring cheaply: 2 batches per
+                                              # split, epochs=1, and SMOKE_TEST_PROBE_GRAPHS
+                                              # graphs probed instead of PROBE_N_GRAPHS.
+                                              # A result IS written -- inspecting the output
+                                              # schema is half the point -- but to
+                                              # <run_id>_smoke.json, and the record carries
+                                              # smoke_test=True so aggregate_results skips
+                                              # it. It must never stand in for a real cell.
     grad_checkpointing: bool = True          # SAN only, full_graph=True only (see
                                               # san_backend.enable_gradient_checkpointing).
                                               # Set False if you have a bigger card and want
@@ -288,7 +294,14 @@ class RunConfig:
 
     @property
     def result_path(self) -> str:
-        return os.path.join(self.results_dir, f"{self.run_id}.json")
+        # A smoke run must never claim the real cell's filename. It writes a result that
+        # LOOKS complete -- same schema, status "ok", a real metric and a real curve --
+        # but from 1 epoch and SMOKE_TEST_PROBE_GRAPHS graphs. Landing that at the real
+        # path silently substitutes it for the cell, and nothing downstream could tell.
+        # The record also carries a smoke_test field; this suffix keeps the two files
+        # from colliding, that field is what stops the smoke one being aggregated.
+        suffix = "_smoke" if self.smoke_test else ""
+        return os.path.join(self.results_dir, f"{self.run_id}{suffix}.json")
 
     def resolved_max_dist(self) -> int:
         if self.max_dist is not None:

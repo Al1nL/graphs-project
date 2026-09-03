@@ -75,10 +75,26 @@ METRIC_HIGHER_IS_BETTER = {"ap": True, "macro_f1": True, "mae": False}
 
 
 def load_all(results_dir="results"):
+    """Every real result record in `results_dir`.
+
+    Smoke-test records are skipped and the count reported. They are written by
+    --smoke-test, carry the full schema and status "ok", and are produced from 1 epoch
+    and a couple of probe graphs -- so nothing about their CONTENT marks them as
+    unusable, and a mean taken over them alongside real cells would look entirely
+    plausible. Filtering on the record's own smoke_test field rather than the filename
+    means a copied or renamed file is still excluded.
+    """
     records = []
-    for path in glob.glob(os.path.join(results_dir, "*.json")):
+    skipped = 0
+    for path in sorted(glob.glob(os.path.join(results_dir, "*.json"))):
         with open(path) as f:
-            records.append(json.load(f))
+            record = json.load(f)
+        if record.get("smoke_test"):
+            skipped += 1
+            continue
+        records.append(record)
+    if skipped:
+        print(f"[aggregate_results] skipped {skipped} smoke-test record(s)")
     return records
 
 

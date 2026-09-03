@@ -428,6 +428,54 @@ def test_smoke_test_shrinks_the_probe_not_just_the_training():
                      num_probe_graphs=8).resolved_num_probe_graphs() == 8
 
 
+def test_smoke_results_never_land_on_the_real_cells_path():
+    """A smoke run wrote results/gps_rwse_peptides-func_seed0.json -- the real cell's file.
+
+    This is the dangerous one, because nothing about the CONTENT gives it away: same
+    schema, status "ok", a real metric_value and a real sensitivity_curve. They just come
+    from 1 epoch and 2 probe graphs. Overwriting the real cell with it is invisible.
+    """
+    from config import RunConfig
+
+    real = RunConfig("gps", "rwse", "peptides-func", 0)
+    smoke = RunConfig("gps", "rwse", "peptides-func", 0, smoke_test=True)
+
+    assert real.result_path != smoke.result_path
+    assert smoke.result_path.endswith("_smoke.json")
+    assert real.result_path.endswith("gps_rwse_peptides-func_seed0.json")
+
+
+def test_aggregation_excludes_smoke_records_by_field_not_filename():
+    """Both halves matter. The field is what actually protects the numbers: results_dir
+    is globbed as *.json, so a _smoke.json file is picked up by the filename glob, and a
+    copied or renamed file would defeat any name-based rule."""
+    import json
+    import sys
+    import tempfile
+
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+    import aggregate_results
+
+    with tempfile.TemporaryDirectory() as tmp:
+        def write(name, record):
+            with open(os.path.join(tmp, name), "w") as f:
+                json.dump(record, f)
+
+        write("real.json", {"backbone": "gps", "smoke_test": False, "metric_value": 0.65})
+        write("cell_smoke.json", {"backbone": "gps", "smoke_test": True,
+                                  "metric_value": 0.19})
+        # renamed to look real -- the field must still exclude it
+        write("looks_real.json", {"backbone": "gps", "smoke_test": True,
+                                  "metric_value": 0.19})
+        # written before the field existed: kept, since absence is not proof of smokiness
+        write("legacy.json", {"backbone": "gps", "metric_value": 0.64})
+
+        loaded = aggregate_results.load_all(tmp)
+
+    values = sorted(r["metric_value"] for r in loaded)
+    assert values == [0.64, 0.65], f"smoke records leaked into aggregation: {values}"
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
