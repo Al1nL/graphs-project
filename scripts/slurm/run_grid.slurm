@@ -54,9 +54,18 @@
 #SBATCH --time=1440
 #SBATCH --signal=USR1@120
 # --requeue: cells on a killable partition can be pre-empted; this asks Slurm to requeue
-# rather than mark the array task failed. A pre-empted cell just re-trains from scratch
-# (run_cell has no mid-training checkpoint/resume of its own) -- accepted cost on
-# killable-class partitions, not a bug in this script.
+# rather than mark the array task failed.
+#
+# A requeued GPS cell RESUMES; it does not restart. graphgps_backend sets
+# cfg.train.auto_resume with enable_ckpt and ckpt_period 10, so a pre-empted cell reloads
+# its last checkpoint and continues, losing at most 10 epochs. That is what makes a
+# 200-epoch cell viable on a partition with a 24 h wall and no protection from
+# pre-emption -- without it, a cell needing longer than the wall would never finish no
+# matter how many times Slurm requeued it. Note the flip side: re-running a cell that
+# already reached max_epoch will NOT retrain it (custom_train logs "Task already done"),
+# so a deliberate retrain needs its results/raw/<cell>/<seed>/ directory cleared first.
+#
+# The SAN arm has no equivalent yet, so a pre-empted SAN cell does restart from scratch.
 #SBATCH --requeue
 
 set -euo pipefail
