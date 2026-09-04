@@ -138,6 +138,24 @@ K_RWSE = 20
 PARAM_BUDGET_REFERENCE_MAX = 510_453   # PascalVOC-SP, the largest in Table A.5
 PARAM_BUDGET_WARN = 520_000
 
+# --- this project's metric names -> the keys GraphGPS's logger actually writes -----------
+# They agree for two of the three datasets and did not for the third. GraphGPS logs
+# macro-F1 under the key 'f1' (logger.py: f1_score(..., average='macro')), while
+# config.TASK_METRIC calls it 'macro_f1'. The QUANTITY is the same -- it really is
+# macro-averaged -- only the name differs, so this is a translation, not a change of
+# metric.
+#
+# Left-hand side untouched on purpose: TASK_METRIC lives in config.py, which the SAN arm
+# also reads, and san_backend keys its higher_is_better test off exactly these strings
+# ("ap", "macro_f1"). Renaming there would silently flip macro-F1 to lower-is-better for
+# SAN and select its WORST epoch. The mismatch is GraphGPS-specific, so the translation
+# belongs here.
+GRAPHGPS_METRIC_KEY = {
+    "ap": "ap",              # peptides-func    -- logger writes 'ap'
+    "mae": "mae",            # peptides-struct  -- logger writes 'mae'
+    "macro_f1": "f1",        # pascalvoc-sp     -- logger writes 'f1', macro-averaged
+}
+
 # PE -> (GraphGym encoder suffix, posenc config key, dim_pe). dim_pe is the encoder's
 # OUTPUT width; see build_graphgym_cfg for why that is not the same as max_freqs.
 PE_SPEC = {
@@ -537,20 +555,39 @@ def _read_best_metric(cfg, metric_name) -> Optional[float]:
 
     path = os.path.join(run_dir_for(cfg.out_dir, cfg.seed), "test", "stats.json")
     if not os.path.exists(path):
+        # Legitimately absent: a cell pre-empted before its first eval. "No score yet" is
+        # the honest answer, and the requeue will fill it in.
         return None
+
+    key = GRAPHGPS_METRIC_KEY.get(metric_name, metric_name)
     best = None
+    seen_keys = set()
     with open(path) as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             rec = json.loads(line)
-            if metric_name not in rec:
+            seen_keys.update(rec)
+            if key not in rec:
                 continue
-            v = rec[metric_name]
+            v = rec[key]
             lower_better = metric_name in ("mae", "loss")
             if best is None or (v < best if lower_better else v > best):
                 best = v
+
+    if best is None and seen_keys:
+        # The stats file exists and has records, but not one of them carries this metric.
+        # That is a naming bug, not a missing score, and returning None for it is how the
+        # macro_f1/f1 mismatch stayed invisible: the cell trains, the probe runs, the
+        # result is written with status "ok" and metric_value null. Fail instead, loudly
+        # and with the available names. Cheap to recover from -- auto_resume means the
+        # re-run reloads the checkpoint rather than retraining.
+        raise RuntimeError(
+            f"metric {metric_name!r} (GraphGPS key {key!r}) appears in no record of "
+            f"{path}. Available keys: {sorted(seen_keys)}. Fix the mapping in "
+            f"graphgps_backend.GRAPHGPS_METRIC_KEY rather than config.TASK_METRIC, which "
+            f"the SAN arm also reads.")
     return best
 
 

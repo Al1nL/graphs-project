@@ -653,6 +653,74 @@ def test_param_budget_warning_does_not_fire_on_the_reference_configs():
         "out of family")
 
 
+def test_macro_f1_is_read_from_graphgpss_own_key():
+    """config.TASK_METRIC calls it 'macro_f1'; GraphGPS's logger writes 'f1'.
+
+    Regression test for a bug that would have hit EVERY pascalvoc-sp cell: the metric
+    lookup found no 'macro_f1' key in any record, returned None, and the cell was written
+    with status "ok" and metric_value null after training and probing perfectly well.
+
+    The quantity was never wrong -- GraphGPS's 'f1' is macro-averaged
+    (f1_score(..., average='macro')). Only the name differed.
+    """
+    import json
+    import tempfile
+    from types import SimpleNamespace
+
+    assert graphgps_backend.GRAPHGPS_METRIC_KEY["macro_f1"] == "f1"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = SimpleNamespace(out_dir=tmp, seed=0)
+        test_dir = os.path.join(graphgps_backend.run_dir_for(tmp, 0), "test")
+        os.makedirs(test_dir)
+        with open(os.path.join(test_dir, "stats.json"), "w") as f:
+            for v in (0.10, 0.37, 0.22):
+                # exactly the keys the VOC smoke run logged
+                f.write(json.dumps({"accuracy": 0.03, "f1": v, "auc": 0.51}) + "\n")
+
+        assert graphgps_backend._read_best_metric(cfg, "macro_f1") == 0.37
+
+
+def test_a_metric_absent_from_every_record_fails_instead_of_returning_none():
+    """The silent None is what let the macro_f1/f1 mismatch hide. A missing FILE is a
+    real 'no score yet' (a cell pre-empted before its first eval); a present file with no
+    such key is a naming bug, and must be told apart from it."""
+    import json
+    import tempfile
+    from types import SimpleNamespace
+
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = SimpleNamespace(out_dir=tmp, seed=0)
+
+        # no file at all -> None, not an error
+        assert graphgps_backend._read_best_metric(cfg, "ap") is None
+
+        test_dir = os.path.join(graphgps_backend.run_dir_for(tmp, 0), "test")
+        os.makedirs(test_dir)
+        with open(os.path.join(test_dir, "stats.json"), "w") as f:
+            f.write(json.dumps({"accuracy": 0.03, "f1": 0.2}) + "\n")
+
+        try:
+            graphgps_backend._read_best_metric(cfg, "ap")
+        except RuntimeError as exc:
+            assert "ap" in str(exc) and "f1" in str(exc), (
+                f"the error must name both the metric sought and what was available: {exc}")
+        else:
+            raise AssertionError("a metric present in no record returned quietly")
+
+
+def test_every_dataset_metric_has_a_graphgps_key():
+    """A dataset whose metric is missing from the table falls through to its own name,
+    which is how pascalvoc-sp failed. Make the table cover the axis explicitly."""
+    from config import DATASETS, TASK_METRIC
+
+    for dataset in DATASETS:
+        metric = TASK_METRIC[dataset]
+        assert metric in graphgps_backend.GRAPHGPS_METRIC_KEY, (
+            f"{dataset}'s metric {metric!r} has no GraphGPS key mapping; if GraphGPS "
+            f"logs it under a different name the cell will report a null metric")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
