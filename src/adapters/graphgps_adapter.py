@@ -29,36 +29,53 @@ import torch.nn.functional as F
 
 
 def build_posenc_config(pe_name: str, cache_dir: str) -> dict:
-    """Returns the `cfg.posenc_*` dict GraphGPS's main.py expects, pointed at our cache."""
-    common = {"enable": False}
-    if pe_name == "none":
-        return {"posenc_LapPE": dict(common), "posenc_RWSE": dict(common), "posenc_SignNet": dict(common)}
+    """A readable SUMMARY of the posenc settings this PE trains with.
 
-    if pe_name == "lappe":
-        cfg = {"posenc_LapPE": {"enable": True, "dim_pe": 16, "model": "DeepSet",
-                                  "precomputed_cache": f"{cache_dir}/{{split}}_pe.pt", "field": "lap_pe"},
-               "posenc_RWSE": dict(common), "posenc_SignNet": dict(common)}
-        return cfg
+    NOT the config that runs. The authority is graphgps_backend.build_graphgym_cfg, which
+    merges GraphGPS's reference YAML and then applies PE_SPEC and PE_ENCODER to the live
+    GraphGym cfg. This function exists so `--dry-run` and the run header can show what a
+    cell is about to do without constructing that cfg (which needs the GraphGPS clone).
 
-    if pe_name == "rwse":
-        cfg = {"posenc_RWSE": {"enable": True, "dim_pe": 20, "kernel": {"times_func": "range(1,21)"},
-                                 "precomputed_cache": f"{cache_dir}/{{split}}_pe.pt", "field": "rwse"},
-               "posenc_LapPE": dict(common), "posenc_SignNet": dict(common)}
-        return cfg
+    Every value is therefore DERIVED from those same tables rather than restated. The
+    previous version restated them, and had drifted: it advertised phi_out_dim 32 while
+    runs used 64, omitted raw_norm_type entirely -- BatchNorm for RWSE, which materially
+    changes what the encoder sees -- and pointed at "<cache>/{split}_pe.pt", a layout the
+    PE cache abandoned for per-graph .npy files under node/, eig/ and spd/. Printed at the
+    top of every run, it read as a record of the configuration while describing something
+    that had not been true for some time.
+    """
+    from backends.graphgps_backend import K_LAP, K_RWSE, PE_ENCODER, PE_SPEC
 
-    if pe_name == "signnet":
-        cfg = {"posenc_SignNet": {"enable": True, "dim_pe": 32, "phi_hidden_dim": 64, "phi_out_dim": 32,
-                                    "precomputed_cache": f"{cache_dir}/{{split}}_pe.pt", "field": "signnet_in"},
-               "posenc_LapPE": dict(common), "posenc_RWSE": dict(common)}
-        return cfg
+    if pe_name not in PE_SPEC:
+        raise ValueError(f"Unknown pe_name: {pe_name}")
+
+    cfg = {key: {"enable": False}
+           for key in ("posenc_LapPE", "posenc_RWSE", "posenc_SignNet")}
+
+    _enc_suffix, posenc_key, dim_pe = PE_SPEC[pe_name]
+    if posenc_key is not None:
+        block = {"enable": True, "dim_pe": dim_pe, **PE_ENCODER[pe_name]}
+        if posenc_key in ("posenc_LapPE", "posenc_SignNet"):
+            # K_LAP, not dim_pe: eigenvectors IN vs channels OUT. They coincide for LapPE
+            # and differ for SignNet (16 in, 32 out).
+            block["eigen"] = {"max_freqs": K_LAP}
+        if posenc_key == "posenc_RWSE":
+            block["kernel"] = {"times_func": f"range(1,{K_RWSE + 1})"}
+        cfg[posenc_key] = block
 
     if pe_name == "grpe":
-        # No native posenc block -- consumed instead by the GRPEBiasedAttention hook below.
-        return {"posenc_LapPE": dict(common), "posenc_RWSE": dict(common), "posenc_SignNet": dict(common),
-                "custom_attn_bias": {"enable": True, "source": "grpe",
-                                      "precomputed_cache": f"{cache_dir}/{{split}}_pe.pt"}}
+        # No native posenc block -- consumed instead by the GRPEBiasedAttention hook below,
+        # which is not yet wired into GPSLayer, so this cell raises NotImplementedError.
+        cfg["custom_attn_bias"] = {"enable": True, "source": "grpe", "status": "NOT WIRED"}
 
-    raise ValueError(f"Unknown pe_name: {pe_name}")
+    cfg["_pe_source"] = (
+        f"{cache_dir} (per-graph .npy under node/, eig/, spd/; read by "
+        f"backends.graphgps_pe_cache, which replaces GraphGPS's own PE pre-transform)"
+        if posenc_key is not None else "n/a -- this arm uses no PE"
+    )
+    cfg["_authority"] = ("summary only; graphgps_backend.build_graphgym_cfg builds the "
+                         "config that actually runs")
+    return cfg
 
 
 class GRPEBiasedAttention(nn.Module):

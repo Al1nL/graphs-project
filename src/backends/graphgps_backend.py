@@ -123,6 +123,21 @@ DATASET_NODE_ENCODER = {
 K_LAP = 16
 K_RWSE = 20
 
+# --- parameter budget ------------------------------------------------------------------
+# The proposal commits to a ~500k budget so the arms stay comparable. Taken as a literal
+# 500,000 it fires on a FAITHFUL reproduction: GraphGPS's own LRGB configs are 504,362
+# (peptides-func), 504,459 (peptides-struct) and 510,453 (PascalVOC-SP) -- Table A.5 of
+# arXiv:2205.12454v3. A warning that trips on the reference recipe is one you learn to
+# scroll past, which costs you the case it exists for.
+#
+# The threshold sits just above the largest reference config, so the three arms that are
+# genuinely in family stay quiet while a real outlier still speaks up: signnet comes in at
+# 576,138 here (dim_pe 32 plus an 8-layer phi), ~14% above the others, which is worth
+# seeing every time. The count is now always printed, so the budget is checkable even when
+# nothing warns.
+PARAM_BUDGET_REFERENCE_MAX = 510_453   # PascalVOC-SP, the largest in Table A.5
+PARAM_BUDGET_WARN = 520_000
+
 # PE -> (GraphGym encoder suffix, posenc config key, dim_pe). dim_pe is the encoder's
 # OUTPUT width; see build_graphgym_cfg for why that is not the same as max_freqs.
 PE_SPEC = {
@@ -492,9 +507,12 @@ def graphgps_train(run_cfg, graphgps_dir: Optional[str] = None) -> dict:
     # custom_train reads cfg.params directly when it logs each epoch
     # (custom_train.py:45,74), so this is load-bearing, not just bookkeeping.
     n_params = cfg.params = params_count(model)
-    if n_params > 500_000:
-        # the proposal commits to a <=500k budget so the arms are comparable
-        print(f"  WARNING: {n_params:,} parameters exceeds the 500k budget in the proposal")
+    print(f"  parameters: {n_params:,}")
+    if n_params > PARAM_BUDGET_WARN:
+        print(f"  WARNING: {n_params:,} parameters is well above the ~500k budget and "
+              f"above every GraphGPS LRGB reference config (max "
+              f"{PARAM_BUDGET_REFERENCE_MAX:,}). This arm is NOT parameter-matched to the "
+              f"others, which weakens any cross-PE comparison drawn from it.")
 
     train_dict[cfg.train.mode](loggers, loaders, model, optimizer, scheduler)
 

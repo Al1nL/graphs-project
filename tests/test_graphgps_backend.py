@@ -17,6 +17,7 @@ Peptides graphs; see the notes in graphgps_backend.py. They are not asserted her
 test that silently skips is worse than one that is absent.
 """
 
+import json
 import os
 import sys
 
@@ -595,6 +596,61 @@ def test_probe_gives_the_encoder_a_batch_vector_for_its_single_graph():
         "the encoder was handed batch=None; SignNet's batched_n_nodes calls .max() on it")
     assert torch.equal(seen[0], torch.zeros(5, dtype=torch.long)), (
         "one graph is a batch of one -- every node must map to graph 0")
+
+
+def test_adapter_summary_is_derived_from_the_tables_that_actually_run():
+    """The printed "resolved adapter config" must not drift from what the run uses.
+
+    It had. build_posenc_config restated PE_SPEC/PE_ENCODER by hand and advertised
+    phi_out_dim 32 while runs used 64, omitted raw_norm_type (BatchNorm for RWSE, which
+    materially changes what the encoder sees), and named a "<cache>/{split}_pe.pt" file
+    the cache stopped using. It is printed at the head of every run, so it read as a
+    record of the configuration while describing something untrue.
+
+    This asserts derivation, not equality with a second hardcoded copy -- another literal
+    table here would be the same bug wearing a test.
+    """
+    import sys
+
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+    from adapters.graphgps_adapter import build_posenc_config
+
+    for pe, (_enc, posenc_key, dim_pe) in graphgps_backend.PE_SPEC.items():
+        summary = build_posenc_config(pe, "cache/peptides-func")
+
+        # nothing may still advertise the retired per-split .pt layout
+        assert "_pe.pt" not in json.dumps(summary), (
+            f"{pe} summary still names the retired <cache>/{{split}}_pe.pt layout")
+
+        if posenc_key is None:
+            for key in ("posenc_LapPE", "posenc_RWSE", "posenc_SignNet"):
+                assert summary[key]["enable"] is False
+            continue
+
+        block = summary[posenc_key]
+        assert block["enable"] is True
+        assert block["dim_pe"] == dim_pe
+
+        # every encoder-head field must match the table build_graphgym_cfg applies
+        for field, value in graphgps_backend.PE_ENCODER[pe].items():
+            assert block[field] == value, (
+                f"{pe}.{field}: summary says {block[field]!r}, the run applies {value!r}")
+
+    # the two specific drifts that prompted this
+    assert build_posenc_config("signnet", "c")["posenc_SignNet"]["phi_out_dim"] == \
+        graphgps_backend.PE_ENCODER["signnet"]["phi_out_dim"]
+    assert build_posenc_config("rwse", "c")["posenc_RWSE"]["raw_norm_type"] == "BatchNorm"
+
+
+def test_param_budget_warning_does_not_fire_on_the_reference_configs():
+    """GraphGPS's own LRGB configs are 504,362 / 504,459 / 510,453 parameters (Table A.5,
+    arXiv:2205.12454v3) -- all above a literal 500,000. The old threshold warned on a
+    faithful reproduction, which teaches you to ignore the warning and so costs you the
+    case it exists for: signnet at 576,138 is genuinely not parameter-matched."""
+    assert graphgps_backend.PARAM_BUDGET_WARN > graphgps_backend.PARAM_BUDGET_REFERENCE_MAX
+    assert graphgps_backend.PARAM_BUDGET_WARN < 576_138, (
+        "the threshold must still catch the signnet arm, the one that is actually "
+        "out of family")
 
 
 if __name__ == "__main__":
