@@ -72,6 +72,12 @@ COUNT_THRESHOLDS = (1, 10, 30)
 # tail is legitimately sparse, which is why check 3 decides and this only explains.
 THIN_BUCKET = 30
 
+# rho below this is treated as no long-range signal at all rather than a small one. It is
+# not a threshold on "small": rho is a ratio of positive quantities, so 1e-6 means the
+# in-window means are ~6 orders of magnitude under the near ones -- decay that steep is a
+# statement about the model, not a measurement to be refined by sampling harder.
+RHO_DEGENERATE = 1e-6
+
 
 def _filter_by_count(curve, min_count):
     return {d: b for d, b in curve.items() if b["count"] >= min_count}
@@ -146,7 +152,27 @@ def analyse(record, n_boot=1000, weight_by_count=False):
     finite = [v for v in rhos.values() if v == v]  # drop NaN
     drift = (max(finite) - min(finite)) if len(finite) > 1 else 0.0
 
-    if missing:
+    # Order matters: this is checked BEFORE coverage and drift, because when it fires
+    # those two are vacuously clean. A curve that is flat zero across the window has every
+    # bucket "populated" and a rho that cannot drift, so the T checks all pass and report
+    # a green light on a cell with no signal in it. Answering "was T big enough?" at all
+    # presumes there is something for T to resolve.
+    in_window_max = max((b["mean"] for b in in_window.values()), default=0.0)
+    near = {d: b for d, b in pooled.items() if d < d_min}
+    near_max = max((b["mean"] for b in near.values()), default=0.0)
+    rho_at_1 = rhos.get(1, float("nan"))
+
+    if rho_at_1 == rho_at_1 and rho_at_1 < RHO_DEGENERATE:
+        verdict = "DEGENERATE"
+        why = (f"rho = {rho_at_1:.3e}, i.e. no measurable long-range sensitivity: the "
+               f"largest in-window mean is {in_window_max:.3e} against {near_max:.3e} "
+               f"near the source. Coverage is fine ({len(in_window)}/{len(expected)} "
+               f"buckets, min {counts[0] if counts else 0} pairs), so this is NOT a T "
+               f"problem and raising T will not change it. Either the model genuinely "
+               f"cannot propagate past d={d_min} -- which for an attention model means "
+               f"checking whether global attention was actually enabled -- or the probe "
+               f"is not reaching those layers.")
+    elif missing:
         verdict = "INADEQUATE"
         why = (f"{len(missing)} of {len(expected)} in-window distances have NO sampled "
                f"pairs and are dropped from both sums, biasing rho down: {missing[:8]}"
@@ -174,6 +200,10 @@ def analyse(record, n_boot=1000, weight_by_count=False):
         "min_count": counts[0] if counts else 0,
         "median_count": counts[len(counts) // 2] if counts else 0,
         "rhos": rhos, "drift": drift, "ci_width": ci_width,
+        "profile": "  ".join(
+            f"d={d}: {pooled[d]['mean']:.3e}"
+            for d in (1, 2, max(1, d_min // 2), d_min, (d_min + d_max) // 2, d_max)
+            if d in pooled),
         "verdict": verdict, "why": why,
     }
 
@@ -216,7 +246,8 @@ def main():
     print()
 
     rows = [analyse(r, args.n_boot, args.weight_by_count) for r in records]
-    rows.sort(key=lambda r: ({"INADEQUATE": 0, "MARGINAL": 1, "UNKNOWN": 2, "OK": 3}[r["verdict"]],
+    rows.sort(key=lambda r: ({"DEGENERATE": 0, "INADEQUATE": 1, "MARGINAL": 2,
+                              "UNKNOWN": 3, "OK": 4}[r["verdict"]],
                              str(r["dataset"]), str(r["pe"]), r["seed"] or 0))
 
     for r in rows:
@@ -228,14 +259,24 @@ def main():
               f"populated {r['n_populated']}/{r['n_expected']}  "
               f"counts min={r['min_count']} median={r['median_count']}")
         print(f"             rho  {rho_str}")
+        if r.get("profile"):
+            print(f"             s_bar {r['profile']}")
         print(f"             {r['why']}")
         print()
 
+    degenerate = [r for r in rows if r["verdict"] == "DEGENERATE"]
+    if degenerate:
+        print("NOTE: cells marked DEGENERATE have no long-range signal to measure. That "
+              "is a finding about the model or its configuration, not about T, and no "
+              "amount of extra sampling addresses it. Resolve those before reading any "
+              "T verdict on the same arm.")
+        print()
     bad = [r for r in rows if r["verdict"] == "INADEQUATE"]
     marginal = [r for r in rows if r["verdict"] == "MARGINAL"]
     unknown = [r for r in rows if r["verdict"] == "UNKNOWN"]
-    print(f"summary: {len(rows) - len(bad) - len(marginal) - len(unknown)} OK, "
-          f"{len(marginal)} marginal, {len(bad)} inadequate, {len(unknown)} unknown")
+    print(f"summary: {len(rows) - len(bad) - len(marginal) - len(unknown) - len(degenerate)}"
+          f" OK, {len(marginal)} marginal, {len(bad)} inadequate, {len(unknown)} unknown, "
+          f"{len(degenerate)} degenerate")
     if bad:
         print("\nT is too small for the cells above. Options, in the order I would weigh "
               "them:")

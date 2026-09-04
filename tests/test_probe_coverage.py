@@ -116,6 +116,42 @@ def test_records_without_pair_counts_are_unknown_not_inadequate():
     assert "count" in out["why"]
 
 
+def test_a_flat_zero_window_is_degenerate_not_ok():
+    """Regression test for a real green light on a result with no signal in it.
+
+    Two of Lior's SAN/VOC cells came back OK with all 23 in-window buckets populated and
+    1,651+ pairs in the thinnest -- and rho 0.0000 at every count threshold. Coverage and
+    drift are both vacuously clean when the window is flat zero: every bucket is
+    "populated", and a rho of zero cannot move. The T checks all passed and reported a
+    healthy cell.
+
+    Asking "was T big enough?" presumes there is something for T to resolve, so this has
+    to be tested before the others and reported as its own verdict.
+    """
+    rec = _record("lappe", set(range(D_MIN, D_MAX + 1)), lambda d: 5000)
+    for d, b in rec["sensitivity_curve"].items():
+        if int(d) >= D_MIN:
+            b["mean"] = 0.0
+    for g in rec["sensitivity_curves_per_graph"]:
+        for d, b in g["curve"].items():
+            if int(d) >= D_MIN:
+                b["mean"] = 0.0
+
+    out = cpc.analyse(rec, n_boot=50)
+    assert out["verdict"] == "DEGENERATE", out["why"]
+    assert not out["missing"], "coverage was fine; the problem is the signal, not sampling"
+    assert "not a t problem" in out["why"].lower()
+
+
+def test_a_small_but_real_tail_is_still_judged_on_T():
+    """The degenerate check must not swallow genuinely small long-range mass -- a steeply
+    decaying but non-zero tail is the normal case and the thing the study measures."""
+    rec = _record("rwse", set(range(D_MIN, D_MAX + 1)), lambda d: 5000)
+    out = cpc.analyse(rec, n_boot=50)
+    assert out["verdict"] != "DEGENERATE"
+    assert out["rhos"][1] > cpc.RHO_DEGENERATE
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
