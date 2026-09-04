@@ -5,11 +5,30 @@ __pycache__/
 cache/
 raw_data/
 
-# Run outputs. results/*.json are produced by run_experiment.py; keep the dir, not the
-# runs. Must be `results/*`, not `results/`: git never descends into an EXCLUDED
-# directory, so with the latter the negation below can never fire.
+# Run outputs. Must be `results/*`, not `results/`: git never descends into an EXCLUDED
+# directory, so with the latter none of the negations below could ever fire.
 results/*
 !results/.gitkeep
+
+# TRACK the per-cell result JSONs. They are the scientific artefact -- curves, rho,
+# per-graph pair counts, config hash, upstream SHA -- and they are kilobytes. Everything
+# expensive stays ignored: results/raw/ holds the checkpoints (~6 MB each, ~120 MB per
+# cell, ~4 GB across the grid) and is excluded by `results/*` above, which git then never
+# descends into, so no stats.json under it is caught by this rule -- a single `*` does not
+# match `/`.
+#
+# The point is off-cluster backup. Before this, the grid's findings existed in exactly one
+# directory on one filesystem, ungitignored nowhere and pushed nowhere; losing it meant
+# re-running everything. The checkpoints are reproducible from these files plus the seed,
+# so this is the half worth carrying.
+!results/*.json
+
+# ...except smoke-test results. They carry the full schema and status "ok" from 1 epoch
+# and 2 probe graphs (see config.RunConfig.smoke_test), so they must never reach a place
+# where they could be mistaken for a cell's real output. aggregate_results already skips
+# them on the smoke_test field; keeping them out of git means they cannot be shared as
+# results by accident either. Last rule wins, so this re-excludes them.
+results/*_smoke.json
 
 .venv/
 venv/
