@@ -82,10 +82,39 @@ def _pooled_from(record):
     return _as_curve(record.get("sensitivity_curve") or {}), _per_graph_curves(record)
 
 
+def _carries_counts(record):
+    """True if the stored curve has real pair counts rather than fabricated ones.
+
+    aggregate_results._as_curve accepts the pre-fix-1 flat {d: mean} schema and gives
+    every bucket count=1 so old records still plot. Those 1s are placeholders, not
+    measurements -- run them through the depth and threshold checks and every such record
+    is condemned as INADEQUATE for a schema reason dressed up as a T reason. Detected from
+    the RAW record, before conversion, so it is exact rather than a guess about whether a
+    run of 1s is real.
+    """
+    raw = record.get("sensitivity_curve") or {}
+    return all(isinstance(v, dict) and "count" in v for v in raw.values())
+
+
 def analyse(record, n_boot=1000, weight_by_count=False):
     dataset = record.get("dataset")
     d_min, d_max = abs_rho_window(dataset)
     pooled, per_graph = _pooled_from(record)
+
+    if not _carries_counts(record):
+        return {
+            "backbone": record.get("backbone"), "pe": record.get("pe"), "dataset": dataset,
+            "seed": record.get("seed"), "T": record.get("num_target_nodes"),
+            "window": (d_min, d_max), "n_expected": d_max - d_min + 1,
+            "n_populated": len([d for d in pooled if d_min <= d <= d_max]),
+            "missing": [], "thin": [], "min_count": 0, "median_count": 0,
+            "rhos": {}, "drift": 0.0, "ci_width": None,
+            "verdict": "UNKNOWN",
+            "why": ("this record predates per-bucket pair counts (flat {d: mean} curve), "
+                    "so coverage and depth cannot be read from it. Re-probing that cell "
+                    "would answer it; its rho is also not poolable with count-carrying "
+                    "records."),
+        }
 
     in_window = {d: b for d, b in pooled.items() if d_min <= d <= d_max}
     expected = list(range(d_min, d_max + 1))
@@ -187,11 +216,12 @@ def main():
     print()
 
     rows = [analyse(r, args.n_boot, args.weight_by_count) for r in records]
-    rows.sort(key=lambda r: ({"INADEQUATE": 0, "MARGINAL": 1, "OK": 2}[r["verdict"]],
+    rows.sort(key=lambda r: ({"INADEQUATE": 0, "MARGINAL": 1, "UNKNOWN": 2, "OK": 3}[r["verdict"]],
                              str(r["dataset"]), str(r["pe"]), r["seed"] or 0))
 
     for r in rows:
-        rho_str = "  ".join(f"k>={k}: {v:.4f}" for k, v in r["rhos"].items())
+        rho_str = ("  ".join(f"k>={k}: {v:.4f}" for k, v in r["rhos"].items())
+                   or "n/a")
         print(f"[{r['verdict']:10}] {r['backbone']}/{r['pe']}/{r['dataset']} "
               f"seed={r['seed']} T={r['T']}")
         print(f"             window d={r['window'][0]}..{r['window'][1]}  "
@@ -203,8 +233,9 @@ def main():
 
     bad = [r for r in rows if r["verdict"] == "INADEQUATE"]
     marginal = [r for r in rows if r["verdict"] == "MARGINAL"]
-    print(f"summary: {len(rows) - len(bad) - len(marginal)} OK, {len(marginal)} marginal, "
-          f"{len(bad)} inadequate")
+    unknown = [r for r in rows if r["verdict"] == "UNKNOWN"]
+    print(f"summary: {len(rows) - len(bad) - len(marginal) - len(unknown)} OK, "
+          f"{len(marginal)} marginal, {len(bad)} inadequate, {len(unknown)} unknown")
     if bad:
         print("\nT is too small for the cells above. Options, in the order I would weigh "
               "them:")

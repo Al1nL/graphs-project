@@ -103,6 +103,19 @@ def test_smoke_records_are_not_analysed():
         assert cpc.load_all(tmp) == []
 
 
+def test_records_without_pair_counts_are_unknown_not_inadequate():
+    """The pre-fix-1 flat {d: mean} schema carries no counts, and _as_curve fabricates
+    count=1 so those records still plot. Judged by the depth and threshold checks, every
+    one of them would be condemned as INADEQUATE -- a schema fact reported as a finding
+    about T. They must come back UNKNOWN instead."""
+    rec = _record("rwse", set(range(D_MIN, D_MAX + 1)), lambda d: 4000 // d)
+    rec["sensitivity_curve"] = {d: b["mean"] for d, b in rec["sensitivity_curve"].items()}
+
+    out = cpc.analyse(rec, n_boot=50)
+    assert out["verdict"] == "UNKNOWN", out["why"]
+    assert "count" in out["why"]
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
