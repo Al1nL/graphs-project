@@ -59,6 +59,25 @@ def test_unpopulated_in_window_buckets_are_inadequate():
     assert str(len(out["missing"])) in out["why"]
 
 
+def test_rho_is_unbiased_in_T_when_coverage_holds():
+    """The counterpart to the bias test below, and the reason T need not be shared.
+
+    With every in-window bucket populated, halving the effective sample per bucket leaves
+    rho untouched: s_bar(d) is a mean over uniformly drawn targets, so it estimates the
+    same population quantity at any T. Only MISSING buckets bias rho, which is why the
+    requirement is that T be sufficient in each arm rather than equal across them.
+    """
+    dense = {d: {"mean": 0.9 ** d, "count": 400} for d in range(1, D_MAX + 1)}
+    sparse = {d: {"mean": 0.9 ** d, "count": 25} for d in range(1, D_MAX + 1)}
+
+    assert (long_range_fraction(dense, D_MIN, D_MAX)
+            == long_range_fraction(sparse, D_MIN, D_MAX))
+    # and under pair weighting too, where the counts enter the sums directly: they scale
+    # with T at every distance, so T cancels in the ratio
+    assert abs(long_range_fraction(dense, D_MIN, D_MAX, weight_by_count=True)
+               - long_range_fraction(sparse, D_MIN, D_MAX, weight_by_count=True)) < 1e-12
+
+
 def test_dropping_far_buckets_biases_rho_downward():
     """Not a property of the script but the reason it exists, so it is pinned here.
 
@@ -78,9 +97,11 @@ def test_dropping_far_buckets_biases_rho_downward():
         f"vs {rho_full:.6f}")
 
 
-def test_mixed_T_across_records_is_flagged():
-    """rho is only comparable at a fixed T, so a results dir holding several must say so
-    rather than let them be averaged together."""
+def test_mixed_T_across_records_is_reported():
+    """A results dir holding several T values must say so -- not because rho is biased
+    across them (it is not; the calibration sweep shows rho flat to within a fifth of its
+    CI half-width over a 32x range of T) but because the lower-T cells carry wider
+    intervals, which decides whether a gap between arms can be called."""
     with tempfile.TemporaryDirectory() as tmp:
         for pe, T in (("rwse", 32), ("lappe", 128)):
             rec = _record(pe, set(range(D_MIN, D_MAX + 1)), lambda d: 4000 // d, T=T)

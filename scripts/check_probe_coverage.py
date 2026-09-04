@@ -19,13 +19,38 @@ term x from both,
     (N - x) / (D - x)  <  N / D        whenever  N < D,  which always holds here
 
 so an unpopulated far bucket does not merely add noise -- it biases rho DOWNWARD, in the
-same direction as the effect the study is looking for. Two arms probed at different T are
-therefore not comparable, and a T too small for either understates long-range mass.
+same direction as the effect the study is looking for.
 
-The corollary that makes this script worth running rather than guessing: T only has to be
-large enough that the far buckets inside the rho window are populated and their means are
-stable. That is checkable from finished results, so a T chosen for one arm can be VALIDATED
-for the others without re-running anything.
+WHAT THAT DOES *NOT* IMPLY
+--------------------------
+That every arm must use the same T. It must not: the bias above comes from MISSING
+buckets, not from unequal sampling. s_bar(d) averages over uniformly drawn targets, so it
+is an unbiased estimate of the population mean at that distance whatever T is -- T changes
+its variance, not its expectation. Confirmed on the calibration sweep rather than argued:
+
+    T=  4  rho=0.13639  CI width=3.39e-02
+    T= 16  rho=0.13946  CI width=2.64e-02
+    T= 64  rho=0.13823  CI width=2.24e-02
+    T= 128 rho=0.13825  CI width=2.19e-02
+
+rho is flat to within a fifth of its CI half-width across a 32x range of T; what changes
+monotonically is the interval. (scripts/calibrate_target_nodes.py --demo, whose own
+verdict is "unbiased relative to T=128 at every rung ... the binding constraint is
+ci_inflation".)
+
+So the requirement is that T be SUFFICIENT in each arm, not identical across them:
+
+  * COVERAGE is a floor set by the DATASET, not the model -- which buckets a given T
+    populates depends on graph topology alone. Both arms on one dataset therefore share
+    the same minimum T, and below it rho is biased down in whichever arm falls short.
+  * PRECISION is per (backbone, dataset). Above the floor, a larger T only tightens the
+    interval. Arms at different T are unbiased relative to each other; they just carry
+    different-width error bars, which matters for whether a gap between them can be
+    called, not for where their point estimates sit.
+
+The corollary that makes this script worth running rather than guessing: coverage is
+checkable from finished results, so a T already used by one arm can be VALIDATED for
+another without re-running anything.
 
 WHAT "ADEQUATE" MEANS HERE
 --------------------------
@@ -239,10 +264,12 @@ def main():
     print(f"{len(records)} probed cell(s) in {args.results_dir}/")
     print(f"T values present: {ts}")
     if len(ts) > 1:
-        print("  WARNING: more than one T across these results. rho is only comparable "
-              "at a FIXED T -- a bucket unpopulated at one T and populated at another "
-              "shifts rho systematically, not just noisily. Cells at different T should "
-              "not be compared to each other.")
+        print("  NOTE: more than one T across these results. That is not by itself a "
+              "problem -- rho is unbiased in T, so cells at different T remain "
+              "comparable in expectation. What differs is precision: the lower-T cells "
+              "carry wider intervals, so a gap between them may be unresolvable even "
+              "when real. It only becomes a bias if a cell fails coverage below, in "
+              "which case its rho is pulled down relative to the others.")
     print()
 
     rows = [analyse(r, args.n_boot, args.weight_by_count) for r in records]
