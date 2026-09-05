@@ -21,6 +21,13 @@
 # extra args too, or edit run_job.sh to forward $SEED, or this will watch for
 # seed1's result file while actually training seed 0 forever. See the paired
 # note in the deployment instructions.
+#
+# To avoid a specific bad/contended node, set EXCLUDE_NODE before calling this
+# script -- it's inserted as a real `sbatch --exclude=...` flag, BEFORE
+# run_job.sh on the command line. Extra args passed after SEED go to run_job.sh
+# itself (and from there to the python script), so --exclude can't be passed
+# that way -- sbatch needs it as its own flag, not an argument to the job script.
+#   EXCLUDE_NODE=s-002 bash scripts/run_until_done.sh grpe peptides-struct 0
 set -uo pipefail
 
 PE="${1:-rwse}"
@@ -31,7 +38,15 @@ shift 3 2>/dev/null || true
 RESULT_PATH="results/san_${PE}_${DATASET}_seed${SEED}.json"
 MAX_RESUBMITS=50
 
+SBATCH_ARGS=()
+if [ -n "${EXCLUDE_NODE:-}" ]; then
+    SBATCH_ARGS+=("--exclude=$EXCLUDE_NODE")
+fi
+
 echo "[run_until_done] PE=$PE DATASET=$DATASET SEED=$SEED | watching for $RESULT_PATH"
+if [ -n "${EXCLUDE_NODE:-}" ]; then
+    echo "[run_until_done] excluding node: $EXCLUDE_NODE"
+fi
 
 if [ -f "$RESULT_PATH" ]; then
     echo "[run_until_done] already done."
@@ -40,7 +55,7 @@ fi
 
 for i in $(seq 1 "$MAX_RESUBMITS"); do
     echo "[run_until_done] attempt $i/$MAX_RESUBMITS..."
-    sbatch --wait run_job.sh "$PE" "$DATASET" --seed "$SEED" "$@"
+    sbatch --wait "${SBATCH_ARGS[@]}" run_job.sh "$PE" "$DATASET" --seed "$SEED" "$@"
     sleep 5
     if [ -f "$RESULT_PATH" ]; then
         echo "[run_until_done] done after $i attempt(s)."
