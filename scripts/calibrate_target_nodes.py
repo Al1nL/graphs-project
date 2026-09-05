@@ -152,12 +152,19 @@ def load_real(backbone, pe, dataset, checkpoint, n_graphs):
     graphgps_dir = ensure_graphgps_importable()
     from torch_geometric.graphgym.loader import create_loader
     from torch_geometric.graphgym.model_builder import create_model
+    from torch_geometric.graphgym.utils.device import auto_select_device
 
     # seed=0 here reconstructs the ARCHITECTURE only -- calibration is a property of the
     # probe and the graph regime, not of the training seed, so which seed's checkpoint you
     # point at should not matter, and it is not recorded as part of what this returns.
     run_cfg = RunConfig(backbone=backbone, pe=pe, dataset=dataset, seed=0)
     build_graphgym_cfg(run_cfg, graphgps_dir)
+    # cfg.accelerator defaults to the string "auto", which create_model passes straight
+    # into torch.device() -- `RuntimeError: Expected one of cpu, cuda, ... at start of
+    # device string: auto`. auto_select_device is what resolves it, and main.py calls it
+    # inside its run loop before touching the loaders. graphgps_backend.graphgps_train
+    # does too; this path replicated the rest of that setup and missed this one step.
+    auto_select_device()
     loaders = create_loader()
     model = create_model()
 
