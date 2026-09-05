@@ -3,6 +3,7 @@
 #SBATCH --account=gpu-students
 #SBATCH --partition=studentkillable
 #SBATCH --gpus=1
+#SBATCH --exclude=s-002
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16000
 #SBATCH --output=/home/yandex/MLWG2026/liorpernik/graphs-project/logs/job_%j.out
@@ -35,4 +36,4 @@ PYLIBS_NVIDIA=$(find $PYLIBS_DIR/nvidia -name lib -type d 2>/dev/null | tr '\n' 
 export LD_LIBRARY_PATH=$NVIDIA_LIBS$PYLIBS_NVIDIA$ENV_DIR/lib:/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 
 echo "[run_job] PE=$PE DATASET=$DATASET"
-$PYTHON src/run_experiment.py --backbone san --pe $PE --dataset $DATASET --seed 0 --num-target-nodes 300 --accumulation-steps 8 "$@"
+$PYTHON src/run_experiment.py --backbone san --pe $PE --dataset $DATASET --seed 0 --num-target-nodes 128 --accumulation-steps 8 "$@"
