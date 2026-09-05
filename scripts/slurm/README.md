@@ -91,23 +91,59 @@ sets it (default `studentbatch`), so you never need to pass it yourself unless o
 
 ## GPU selection
 
-The cluster exposes GPU type as a `--constraint` feature, not a partition. Available
-features (from the cluster's hardware table): `tesla_v100`, `quadro_rtx_8000`,
-`geforce_rtx_3090`, `titan_xp`, `geforce_rtx_2080`, `a100`, `a5000`, `a6000`, `l40s`.
-
-`submit_grid.sh` leaves `--constraint` empty by default (any available GPU). If a cell is
-failing with an out-of-memory error on an older/smaller card, or you want to avoid the
-oldest hardware (`titan_xp`, `geforce_rtx_2080`) for consistency across seeds of the same
-cell, request newer cards explicitly:
+GPU type is a Slurm **feature** (`--constraint`), and the features that exist depend on
+the partition. Ask Slurm rather than trusting any list, including this one:
 
 ```bash
-scripts/slurm/submit_grid.sh gps 32 --constraint="a5000|a6000|l40s|geforce_rtx_3090"
+sinfo -p studentkillable -N -o "%20N %40f %30G"
+```
+
+As of 2026-09-05 that partition is five nodes and exactly **two** features:
+
+| node | feature | architecture |
+|---|---|---|
+| s-002, s-003, s-006 | `titan_xp` | Pascal (sm_61) |
+| s-004, s-005 | `geforce_rtx_2080` | Turing (sm_75) |
+
+**Use `--constraint=geforce_rtx_2080`.** The Titan Xp nodes no longer run this project's
+CUDA 11.7 torch: the cluster driver is now 580.173.02 / CUDA 13.0, which drops Pascal
+compute support, so `nvidia-smi` enumerates the cards happily while any CUDA context
+fails with
+
+```
+RuntimeError: CUDA unknown error - this may be due to an incorrectly set up environment ...
+```
+
+This is recent -- cells trained successfully on s-003 (a Titan Xp) before the driver
+upgrade. Re-check with the smoke test above before assuming it still applies; if the
+nodes are rebuilt or the env moves to a CUDA 12.x torch, the constraint stops being
+necessary.
+
+Note that Slurm rejects the WHOLE expression if any name in it is unknown:
+
+```
+srun: error: Unable to allocate resources: Invalid feature specification
+```
+
+so an OR-list borrowed from the cluster's general hardware documentation (`a100`,
+`a5000`, `l40s`, `geforce_rtx_3090`, `quadro_rtx_8000`, `tesla_v100` ...) fails outright
+here, even though those features are real on partitions a `gpu-students` association
+cannot reach. Only ever name features `sinfo` shows for the partition you are submitting
+to.
+
+`submit_grid.sh` leaves `--constraint` empty by default -- deliberately, because the right
+value is a fact about the cluster on the day you run, not something to hardcode -- and
+passes through whatever you give it:
+
+```bash
+scripts/slurm/submit_grid.sh gps 8 --dataset=peptides-func     --pe=none,lappe,rwse,signnet --constraint=geforce_rtx_2080
 ```
 
 Do NOT vary `--constraint` across seeds of the *same* (backbone, pe, dataset) cell if you
-care about wall-clock comparisons between them — different GPU generations have different
+care about wall-clock comparisons between them -- different GPU generations have different
 throughput, which would confound a "how long did training take" comparison, though not the
-task metric or sensitivity curve themselves.
+task metric or sensitivity curve themselves. Pinning one constraint for the entire grid is
+the safer habit, and right now it is also the only one that runs.
 
 ## Smoke test before submitting 45 cells
 
