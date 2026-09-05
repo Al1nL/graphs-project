@@ -292,19 +292,31 @@ def test_load_real_resolves_the_accelerator_before_building_the_model():
     with open(src, encoding="utf-8") as f:
         tree = ast.parse(f.read())
 
-    fn = next(n for n in ast.walk(tree)
-              if isinstance(n, ast.FunctionDef) and n.name == "load_real")
-    calls = {}
-    for node in ast.walk(fn):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            calls.setdefault(node.func.id, node.lineno)
+    # Located by the calls it makes, not by the name `load_real`. This file is shared
+    # with the SAN arm, whose probe is not wired yet; when it is, this loader may well be
+    # split per backbone. A test of ours failing with StopIteration because a function of
+    # theirs was renamed is a bad trade -- what actually matters is that whichever
+    # function builds a GraphGym model resolves the accelerator first.
+    builders = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+                and any(isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+                        and c.func.id == "create_model" for c in ast.walk(n))]
+    assert builders, (
+        "no function in calibrate_target_nodes.py calls create_model(); if the GraphGym "
+        "model construction moved, move this check with it")
 
-    assert "auto_select_device" in calls, (
-        "load_real never calls auto_select_device(), so cfg.accelerator stays the string "
-        "'auto' and create_model() fails on torch.device('auto')")
-    for consumer in ("create_loader", "create_model"):
-        assert calls["auto_select_device"] < calls[consumer], (
-            f"auto_select_device() must precede {consumer}()")
+    for fn in builders:
+        calls = {}
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                calls.setdefault(node.func.id, node.lineno)
+
+        assert "auto_select_device" in calls, (
+            f"{fn.name}() calls create_model() without auto_select_device(), so "
+            f"cfg.accelerator stays the string 'auto' and torch.device('auto') raises")
+        for consumer in ("create_loader", "create_model"):
+            if consumer in calls:
+                assert calls["auto_select_device"] < calls[consumer], (
+                    f"{fn.name}(): auto_select_device() must precede {consumer}()")
 
 
 if __name__ == "__main__":
