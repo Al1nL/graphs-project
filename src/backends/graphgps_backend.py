@@ -544,51 +544,88 @@ def graphgps_train(run_cfg, graphgps_dir: Optional[str] = None) -> dict:
     }
 
 
-def _read_best_metric(cfg, metric_name) -> Optional[float]:
-    """Best test-split value, read back from the stats GraphGPS's logger wrote.
-
-    Deliberately parsed from disk rather than scraped out of the logger objects: the loop
-    owns those, their internals move between versions, and the file is the artefact
-    GraphGPS itself treats as the result.
-    """
+def _read_split_series(run_dir, split, key):
+    """{epoch: value} for one metric on one split, plus every key seen in that file."""
     import json
 
-    path = os.path.join(run_dir_for(cfg.out_dir, cfg.seed), "test", "stats.json")
+    path = os.path.join(run_dir, split, "stats.json")
+    series, seen = {}, set()
     if not os.path.exists(path):
-        # Legitimately absent: a cell pre-empted before its first eval. "No score yet" is
-        # the honest answer, and the requeue will fill it in.
-        return None
-
-    key = GRAPHGPS_METRIC_KEY.get(metric_name, metric_name)
-    best = None
-    seen_keys = set()
+        return series, seen, path
     with open(path) as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             rec = json.loads(line)
-            seen_keys.update(rec)
-            if key not in rec:
-                continue
-            v = rec[key]
-            lower_better = metric_name in ("mae", "loss")
-            if best is None or (v < best if lower_better else v > best):
-                best = v
+            seen.update(rec)
+            if key in rec and "epoch" in rec:
+                # a requeued cell re-logs epochs it already wrote; last write wins
+                series[int(rec["epoch"])] = rec[key]
+    return series, seen, path
 
-    if best is None and seen_keys:
-        # The stats file exists and has records, but not one of them carries this metric.
-        # That is a naming bug, not a missing score, and returning None for it is how the
-        # macro_f1/f1 mismatch stayed invisible: the cell trains, the probe runs, the
-        # result is written with status "ok" and metric_value null. Fail instead, loudly
-        # and with the available names. Cheap to recover from -- auto_resume means the
-        # re-run reloads the checkpoint rather than retraining.
+
+def _read_best_metric(cfg, metric_name) -> Optional[float]:
+    """Test-split value AT THE EPOCH SELECTED ON VALIDATION.
+
+    Not the best test value. That distinction is the whole point of this function, and it
+    used to get it wrong: it took the max over the test split across every epoch, which is
+    model selection on the test set. On the first real cell that reported a number drawn
+    from wherever test AP happened to peak across 200 epochs, rather than 0.6496, the test
+    AP at epoch 151 -- the epoch validation actually chose. Small in magnitude, and
+    exactly the kind of thing a reviewer is entitled to reject a table over.
+
+    GraphGPS's own "Best so far" line has always done this correctly; only our read-back
+    did not. Parsed from disk rather than scraped off the logger objects because the
+    training loop owns those, their internals move between versions, and the stats file is
+    the artefact GraphGPS itself treats as the result.
+    """
+    run_dir = run_dir_for(cfg.out_dir, cfg.seed)
+    key = GRAPHGPS_METRIC_KEY.get(metric_name, metric_name)
+    lower_better = metric_name in ("mae", "loss")
+
+    val, val_keys, val_path = _read_split_series(run_dir, "val", key)
+    test, test_keys, test_path = _read_split_series(run_dir, "test", key)
+
+    # Checked BEFORE the empty-series return: a file that exists with records but no such
+    # metric yields an empty SERIES too, so returning None first would swallow exactly the
+    # naming bug this is here to catch.
+    for seen, path in ((val_keys, val_path), (test_keys, test_path)):
+        if seen and key not in seen:
+            # File exists with records but no such metric: a naming bug, not a missing
+            # score. Returning None for it is how the macro_f1/f1 mismatch stayed
+            # invisible -- the cell trained, the probe ran, and the result was written
+            # with status "ok" and metric_value null. auto_resume makes the re-run cheap.
+            raise RuntimeError(
+                f"metric {metric_name!r} (GraphGPS key {key!r}) appears in no record of "
+                f"{path}. Available keys: {sorted(seen)}. Fix the mapping in "
+                f"graphgps_backend.GRAPHGPS_METRIC_KEY rather than config.TASK_METRIC, "
+                f"which the SAN arm also reads.")
+
+    if not val and not test:
+        # Legitimately absent: a cell pre-empted before its first eval. "No score yet" is
+        # the honest answer, and the requeue will fill it in.
+        return None
+
+    if not val:
         raise RuntimeError(
-            f"metric {metric_name!r} (GraphGPS key {key!r}) appears in no record of "
-            f"{path}. Available keys: {sorted(seen_keys)}. Fix the mapping in "
-            f"graphgps_backend.GRAPHGPS_METRIC_KEY rather than config.TASK_METRIC, which "
-            f"the SAN arm also reads.")
-    return best
+            f"{os.path.join(run_dir, 'val', 'stats.json')} has no usable records while "
+            f"the test split does. The epoch must be chosen on validation; falling back "
+            f"to the best TEST value would be selection on the test set, which is the "
+            f"bug this function exists to avoid.")
+
+    best_epoch = (min if lower_better else max)(val, key=lambda e: val[e])
+    if best_epoch not in test:
+        raise RuntimeError(
+            f"validation selected epoch {best_epoch} but the test split has no record for "
+            f"it (test epochs: {sorted(test)[:5]}...). Reporting a different epoch's test "
+            f"score would silently break the selection protocol.")
+
+    print(f"  metric: {metric_name}={test[best_epoch]:.4f} at epoch {best_epoch} "
+          f"(selected on val {metric_name}={val[best_epoch]:.4f}; best test seen was "
+          f"{(min if lower_better else max)(test.values()):.4f} -- NOT reported, that "
+          f"would be selection on test)")
+    return test[best_epoch]
 
 
 # ---------------------------------------------------------------------------

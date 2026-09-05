@@ -26,6 +26,23 @@ import run_experiment  # noqa: E402
 from backends import graphgps_backend  # noqa: E402
 
 
+
+def _write_stats(run_dir, split, epoch_values, key, extra=None, also=None):
+    """Write a GraphGPS-shaped stats.json: one JSON object per epoch, per split."""
+    import json
+
+    d = os.path.join(run_dir, split)
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "stats.json"), "w") as f:
+        for epoch, value in epoch_values:
+            rec = {"epoch": epoch, key: value, "loss": 1.0}
+            if also:
+                rec[also] = value
+            if extra:
+                rec.update(extra)
+            f.write(json.dumps(rec) + "\n")
+
+
 def test_importing_the_orchestrator_does_not_import_graphgps():
     """The launcher's --dry-run, and this whole suite, must work with no GraphGPS env."""
     assert "graphgps" not in sys.modules, (
@@ -121,15 +138,14 @@ def test_run_dir_and_metric_readback_agree_on_the_layout():
         # land on the same directory or auto_resume cannot find the checkpoint it left
         assert os.path.basename(run_dir) == "3"
 
-        # write what GraphGPS's logger writes, where it writes it
-        test_dir = os.path.join(run_dir, "test")
-        os.makedirs(test_dir)
-        with open(os.path.join(test_dir, "stats.json"), "w") as f:
-            for ap in (0.10, 0.42, 0.31):
-                f.write(json.dumps({"ap": ap, "loss": 1.0}) + "\n")
+        # write what GraphGPS's logger writes, where it writes it. val peaks at epoch 1;
+        # test peaks at epoch 2. The reported number must be test AT EPOCH 1 -- 0.42, not
+        # the larger 0.51, which would be selection on the test set.
+        _write_stats(run_dir, "val",  [(0, 0.20), (1, 0.55), (2, 0.40)], "ap")
+        _write_stats(run_dir, "test", [(0, 0.10), (1, 0.42), (2, 0.51)], "ap")
 
         assert graphgps_backend._read_best_metric(cfg, "ap") == 0.42, (
-            "the score reader did not find the stats file the trainer's run_dir points at")
+            "reported the best TEST value instead of test at the val-selected epoch")
 
 
 def test_best_metric_direction_depends_on_the_metric():
@@ -141,14 +157,13 @@ def test_best_metric_direction_depends_on_the_metric():
 
     with tempfile.TemporaryDirectory() as tmp:
         cfg = SimpleNamespace(out_dir=tmp, seed=0)
-        test_dir = os.path.join(graphgps_backend.run_dir_for(tmp, 0), "test")
-        os.makedirs(test_dir)
-        with open(os.path.join(test_dir, "stats.json"), "w") as f:
-            for v in (0.5, 0.2, 0.9):
-                f.write(json.dumps({"mae": v, "ap": v}) + "\n")
+        run_dir = graphgps_backend.run_dir_for(tmp, 0)
+        # val and test agree here, so the direction of selection is the only thing tested
+        for split in ("val", "test"):
+            _write_stats(run_dir, split, [(0, 0.5), (1, 0.2), (2, 0.9)], "mae", also="ap")
 
-        assert graphgps_backend._read_best_metric(cfg, "mae") == 0.2
-        assert graphgps_backend._read_best_metric(cfg, "ap") == 0.9
+        assert graphgps_backend._read_best_metric(cfg, "mae") == 0.2   # lower better
+        assert graphgps_backend._read_best_metric(cfg, "ap") == 0.9    # higher better
 
 
 def test_missing_stats_file_reports_none_rather_than_raising():
@@ -671,12 +686,11 @@ def test_macro_f1_is_read_from_graphgpss_own_key():
 
     with tempfile.TemporaryDirectory() as tmp:
         cfg = SimpleNamespace(out_dir=tmp, seed=0)
-        test_dir = os.path.join(graphgps_backend.run_dir_for(tmp, 0), "test")
-        os.makedirs(test_dir)
-        with open(os.path.join(test_dir, "stats.json"), "w") as f:
-            for v in (0.10, 0.37, 0.22):
-                # exactly the keys the VOC smoke run logged
-                f.write(json.dumps({"accuracy": 0.03, "f1": v, "auc": 0.51}) + "\n")
+        run_dir = graphgps_backend.run_dir_for(tmp, 0)
+        for split in ("val", "test"):
+            # exactly the keys the VOC smoke run logged
+            _write_stats(run_dir, split, [(0, 0.10), (1, 0.37), (2, 0.22)], "f1",
+                         extra={"accuracy": 0.03, "auc": 0.51})
 
         assert graphgps_backend._read_best_metric(cfg, "macro_f1") == 0.37
 
@@ -695,10 +709,8 @@ def test_a_metric_absent_from_every_record_fails_instead_of_returning_none():
         # no file at all -> None, not an error
         assert graphgps_backend._read_best_metric(cfg, "ap") is None
 
-        test_dir = os.path.join(graphgps_backend.run_dir_for(tmp, 0), "test")
-        os.makedirs(test_dir)
-        with open(os.path.join(test_dir, "stats.json"), "w") as f:
-            f.write(json.dumps({"accuracy": 0.03, "f1": 0.2}) + "\n")
+        _write_stats(graphgps_backend.run_dir_for(tmp, 0), "test",
+                     [(0, 0.2)], "f1", extra={"accuracy": 0.03})
 
         try:
             graphgps_backend._read_best_metric(cfg, "ap")
@@ -719,6 +731,68 @@ def test_every_dataset_metric_has_a_graphgps_key():
         assert metric in graphgps_backend.GRAPHGPS_METRIC_KEY, (
             f"{dataset}'s metric {metric!r} has no GraphGPS key mapping; if GraphGPS "
             f"logs it under a different name the cell will report a null metric")
+
+
+def test_the_reported_score_is_never_the_best_test_score():
+    """The distinction this function exists for, isolated.
+
+    _read_best_metric used to take the max over the TEST split across every epoch, which
+    is model selection on the test set. On the first real cell that would have reported
+    whatever test AP peaked across 200 epochs instead of 0.6496, the test AP at epoch 151
+    -- the epoch validation chose. Small in magnitude, and exactly the kind of thing a
+    reviewer is entitled to throw out a table over.
+
+    Here val and test peak at DIFFERENT epochs, so the two protocols give different
+    numbers and only the correct one passes.
+    """
+    import tempfile
+    from types import SimpleNamespace
+
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = SimpleNamespace(out_dir=tmp, seed=0)
+        run_dir = graphgps_backend.run_dir_for(tmp, 0)
+
+        _write_stats(run_dir, "val",  [(0, 0.30), (1, 0.90), (2, 0.40)], "ap")
+        _write_stats(run_dir, "test", [(0, 0.20), (1, 0.50), (2, 0.99)], "ap")
+
+        got = graphgps_backend._read_best_metric(cfg, "ap")
+        assert got == 0.50, f"expected test-at-val-selected-epoch 0.50, got {got}"
+        assert got != 0.99, "reported the best test score -- selection on the test set"
+
+
+def test_selection_direction_is_taken_from_the_metric_on_the_val_split():
+    """For a lower-is-better metric the val ARGMIN selects the epoch. Getting the
+    direction right on test but wrong on val would pick the worst validation epoch and
+    still look plausible, since the returned number is a real test score either way."""
+    import tempfile
+    from types import SimpleNamespace
+
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = SimpleNamespace(out_dir=tmp, seed=0)
+        run_dir = graphgps_backend.run_dir_for(tmp, 0)
+
+        _write_stats(run_dir, "val",  [(0, 0.90), (1, 0.10), (2, 0.50)], "mae")
+        _write_stats(run_dir, "test", [(0, 0.80), (1, 0.15), (2, 0.60)], "mae")
+
+        assert graphgps_backend._read_best_metric(cfg, "mae") == 0.15
+
+
+def test_a_test_split_without_a_val_split_refuses_to_guess():
+    """Falling back to the best test value when val is missing would reintroduce the bug
+    exactly where it is least visible, so it raises instead."""
+    import tempfile
+    from types import SimpleNamespace
+
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = SimpleNamespace(out_dir=tmp, seed=0)
+        _write_stats(graphgps_backend.run_dir_for(tmp, 0), "test",
+                     [(0, 0.2), (1, 0.9)], "ap")
+        try:
+            graphgps_backend._read_best_metric(cfg, "ap")
+        except RuntimeError as exc:
+            assert "validation" in str(exc).lower()
+        else:
+            raise AssertionError("selected an epoch without a validation split")
 
 
 if __name__ == "__main__":
