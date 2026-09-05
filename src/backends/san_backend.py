@@ -276,6 +276,41 @@ CHANGELOG (this pass)
   datasets -- expect at least one of the class-specific attribute-name
   guesses in make_san_model_fn (documented in its own docstring) to need a
   similar fix once those are actually run.
+- san_train now checks for an existing results/model_<backbone>_<pe>_<dataset>_seed<seed>.pt BEFORE training, and skips straight to returning it (loaders +
+  probe_dataset still freshly built) if found, rather than always retraining.
+  Paired with the model-persistence fix above: without this, that fix only
+  enabled MANUAL re-probing via a separate script -- a job that crashed during
+  the probe phase (after training completed) still retrained 100+ epochs from
+  scratch on resubmit, because the training-resume checkpoint is deleted the
+  moment training ends, before probing starts. This closes that gap: an
+  auto-resubmit via run_until_done.sh now finds the already-saved model and
+  goes straight back to probing instead. Falls back to normal training if the
+  saved state_dict doesn't cleanly load into the freshly-built architecture
+  (e.g. if BASE_NET_PARAMS changed since it was saved), printing a warning
+  rather than silently retraining OR silently probing a mismatched model.
+  best_metric and num_params are now also saved in model_*.pt (previously
+  only model_state/net_params), since a completion that crashes before its
+  result JSON is written has nowhere else these numbers survive. NOT yet
+  validated against a real crash-during-probe-then-resubmit cycle.
+- REAL, SILENT BUG FOUND AND FIXED: _SAN_NodeClassification (pascalvoc-sp)
+  gated its sign-invariant SignNet path on `lpe == "signnet"`, where `lpe`
+  is net_params["LPE"] -- but PE_SPEC["signnet"] sets LPE="node" (same as
+  lappe/rwse/grpe), never "signnet". That check was therefore ALWAYS FALSE,
+  both in __init__ (signnet_phi was never created) and in forward() (the
+  sign-invariant branch was never taken) -- every signnet/pascalvoc-sp run
+  silently fell through to the generic eigenvector PE_Transformer path
+  instead, i.e. trained IDENTICALLY TO LAPPE, not real SignNet. Found only
+  because a completed run's probe phase crashed with AttributeError:
+  'signnet_phi' -- had probing not been added, this would have stayed
+  silent indefinitely. Fixed by adding self.is_signnet = net_params.get(
+  "pe") == "signnet" (same pattern as the existing is_rwse fix) and using
+  that instead of the LPE-based check, in both __init__ and forward.
+  ANY EXISTING signnet/pascalvoc-sp RESULT FROM BEFORE THIS FIX IS
+  MISLABELED (it is actually a lappe-equivalent run) AND MUST BE DISCARDED
+  AND RE-RUN, not counted as a real SignNet data point. Other datasets are
+  unaffected: peptides-func/peptides-struct's signnet path goes through
+  _SAN_SignNetLPE / the default gnn_model dispatch respectively, neither of
+  which has this bug (checked directly, not just assumed by analogy).
 """
 
 import gc
@@ -719,31 +754,41 @@ class _SAN_NodeClassification(torch.nn.Module):
         # RWSE gets its own encoder, same fix as _SAN_RWSE / _SAN_NodeLPE_Regression:
         # a plain per-node MLP over the full ordered RWSE vector, instead of falling
         # through to the eigenvector-shaped linear_A/PE_Transformer/mean-pool-across-
-        # steps path below (self.lpe == "node" is shared by lappe/rwse/grpe and can't
-        # tell them apart on its own -- net_params["pe"], set by build_san_net_params,
-        # is used here instead).
+        # steps path below (self.lpe == "node" is shared by lappe/rwse/grpe/signnet
+        # and can't tell them apart on its own -- net_params["pe"], set by
+        # build_san_net_params, is used here instead).
         self.is_rwse = net_params.get("pe") == "rwse"
+        # Same problem, same fix, for signnet: PE_SPEC["signnet"] sets LPE="node"
+        # (not "signnet"), so `lpe == "signnet"` below was ALWAYS FALSE -- every
+        # signnet/pascalvoc-sp run silently fell through to the generic eigenvector
+        # PE_Transformer path instead of the sign-invariant one, i.e. it trained
+        # identically to lappe, not real SignNet. Found via a probe-time
+        # AttributeError (signnet_phi never got created) that only surfaced once a
+        # completed signnet run actually reached the probe -- ANY EXISTING signnet/
+        # pascalvoc-sp RESULT PREDATING THIS FIX IS MISLABELED AND SHOULD BE
+        # DISCARDED, not counted as a real SignNet result.
+        self.is_signnet = net_params.get("pe") == "signnet"
         if self.is_rwse:
             self.rwse_encoder = torch.nn.Sequential(
                 torch.nn.Linear(LPE_dim, LPE_dim), torch.nn.ReLU(),
                 torch.nn.Linear(LPE_dim, LPE_dim),
             )
-        # LPE components (only if not 'none' and not rwse, which has its own path)
+        elif self.is_signnet:
+            self.signnet_phi = torch.nn.Sequential(
+                torch.nn.Linear(1, LPE_dim), torch.nn.ReLU(),
+                torch.nn.Linear(LPE_dim, LPE_dim),
+            )
+        # LPE components (only if not 'none' and not rwse/signnet, which have their
+        # own paths above)
         elif lpe != "none":
             LPE_n_heads = net_params["LPE_n_heads"]
             LPE_layers = net_params["LPE_layers"]
-            if lpe == "signnet":
-                self.signnet_phi = torch.nn.Sequential(
-                    torch.nn.Linear(1, LPE_dim), torch.nn.ReLU(),
-                    torch.nn.Linear(LPE_dim, LPE_dim),
-                )
-            else:
-                encoder_layer = torch.nn.TransformerEncoderLayer(
-                    d_model=LPE_dim, nhead=LPE_n_heads, batch_first=False,
-                    dim_feedforward=LPE_dim * 2)  # default 2048 OOMs; keep proportional
-                self.PE_Transformer = torch.nn.TransformerEncoder(
-                    encoder_layer, num_layers=LPE_layers)
-                self.linear_A = torch.nn.Linear(2, LPE_dim)
+            encoder_layer = torch.nn.TransformerEncoderLayer(
+                d_model=LPE_dim, nhead=LPE_n_heads, batch_first=False,
+                dim_feedforward=LPE_dim * 2)  # default 2048 OOMs; keep proportional
+            self.PE_Transformer = torch.nn.TransformerEncoder(
+                encoder_layer, num_layers=LPE_layers)
+            self.linear_A = torch.nn.Linear(2, LPE_dim)
 
         # GT layers
         self.layers = torch.nn.ModuleList([
@@ -774,23 +819,26 @@ class _SAN_NodeClassification(torch.nn.Module):
             # pe == "rwse" branch). EigVals is a zero placeholder, unused.
             pe = self.rwse_encoder(EigVecs)  # [n, LPE_dim]
             h = torch.cat([h, pe], dim=-1)
+        elif self.is_signnet and EigVecs is not None:
+            # Sign-invariant: phi(v) + phi(-v) per eigenvector. Was previously
+            # gated on self.lpe == "signnet", which is never true (self.lpe ==
+            # "node" for signnet, same as lappe/rwse/grpe) -- see __init__'s
+            # comment. Fixed to use self.is_signnet instead.
+            n, k = EigVecs.shape
+            v = EigVecs.view(n * k, 1)
+            pe = (self.signnet_phi(v) + self.signnet_phi(-v)).view(n, k, -1)
+            pe = pe.mean(dim=1)  # [n, LPE_dim]
+            h = torch.cat([h, pe], dim=-1)
         elif self.lpe != "none" and EigVecs is not None:
-            if self.lpe == "signnet":
-                # Sign-invariant: phi(v) + phi(-v) per eigenvector
-                n, k = EigVecs.shape
-                v = EigVecs.view(n * k, 1)
-                pe = (self.signnet_phi(v) + self.signnet_phi(-v)).view(n, k, -1)
-                pe = pe.mean(dim=1)  # [n, LPE_dim]
-            else:
-                EigVecs_u = EigVecs.unsqueeze(-1)              # [n, k, 1]
-                pe_inp = torch.cat([EigVecs_u, EigVals], dim=-1)  # [n, k, 2]
-                # mask: nodes where ALL k eigenvecs are zero (padding) -- shape [n]
-                empty_mask = (EigVecs == 0).all(dim=-1)        # [n]
-                pe_inp[empty_mask] = 0.0                       # zero out padded rows
-                pe_inp = pe_inp.transpose(0, 1)                # [k, n, 2]
-                pe = self.linear_A(pe_inp)                     # [k, n, LPE_dim]
-                pe = self.PE_Transformer(pe)                   # [k, n, LPE_dim]
-                pe = pe.transpose(0, 1).mean(dim=1)            # [n, LPE_dim]
+            EigVecs_u = EigVecs.unsqueeze(-1)              # [n, k, 1]
+            pe_inp = torch.cat([EigVecs_u, EigVals], dim=-1)  # [n, k, 2]
+            # mask: nodes where ALL k eigenvecs are zero (padding) -- shape [n]
+            empty_mask = (EigVecs == 0).all(dim=-1)        # [n]
+            pe_inp[empty_mask] = 0.0                       # zero out padded rows
+            pe_inp = pe_inp.transpose(0, 1)                # [k, n, 2]
+            pe = self.linear_A(pe_inp)                     # [k, n, LPE_dim]
+            pe = self.PE_Transformer(pe)                   # [k, n, LPE_dim]
+            pe = pe.transpose(0, 1).mean(dim=1)            # [n, LPE_dim]
             h = torch.cat([h, pe], dim=-1)
 
         # GT layers
@@ -1244,6 +1292,40 @@ def san_train(run_cfg, san_dir: Optional[str] = None) -> dict:
     train_loader, val_loader, test_loader, class_weights, probe_dataset = _build_loaders(
         run_cfg, net_params, train_params)
 
+    # If a PREVIOUS attempt already finished training and only crashed during the
+    # SUBSEQUENT probe phase, a model_*.pt file will already exist here (saved right
+    # after the training-resume checkpoint is deleted, at the very end of a normal
+    # run below). Without this check, a resubmit has nothing to resume training
+    # from (that checkpoint is already gone) and retrains 100+ epochs from scratch
+    # just to redo a probe that crashed for an unrelated reason -- observed
+    # repeatedly today. If a completed model is found, skip training entirely and
+    # go straight to returning it so run_cell can re-attempt only the probe.
+    final_model_path = os.path.join(
+        run_cfg.results_dir,
+        f"model_{run_cfg.backbone}_{run_cfg.pe}_{run_cfg.dataset}_seed{run_cfg.seed}.pt")
+    if os.path.exists(final_model_path):
+        saved = torch.load(final_model_path, map_location=device)
+        missing, unexpected = model.load_state_dict(saved["model_state"], strict=False)
+        if missing or unexpected:
+            print(f"  [skip-training] WARNING: saved model at {final_model_path} did "
+                  f"not cleanly load into the freshly-built architecture "
+                  f"(missing={missing}, unexpected={unexpected}) -- falling back to "
+                  "training from scratch rather than risk probing a mismatched "
+                  "model. This can happen if _build_san_model/build_san_net_params "
+                  "changed since this file was saved.", flush=True)
+        else:
+            print(f"  [skip-training] found a completed model at {final_model_path} "
+                  f"(best={saved.get('best_metric')}) -- skipping training, going "
+                  "straight to the probe.", flush=True)
+            return {
+                "model": model,
+                "loaders": [train_loader, val_loader, test_loader],
+                "num_params": saved.get("num_params", n_params),
+                "metric_name": run_cfg.metric_name,
+                "metric_value": saved.get("best_metric"),
+                "probe_dataset": probe_dataset,
+            }
+
     optimizer = torch.optim.Adam(model.parameters(), lr=train_params["init_lr"],
                                  weight_decay=train_params["weight_decay"])
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -1327,7 +1409,7 @@ def san_train(run_cfg, san_dir: Optional[str] = None) -> dict:
             # The underlying "~1MB/step leak" this workaround targets was never
             # actually diagnosed -- that figure is inherited from the original
             # code's comment and was not independently verified.
-            if net_params.get("full_graph") and device.type == "cuda" and global_step % 10 == 0:
+            if net_params.get("full_graph") and device.type == "cuda" and global_step % 100 == 0:
                 gc.collect()
                 torch.cuda.empty_cache()
 
@@ -1358,6 +1440,24 @@ def san_train(run_cfg, san_dir: Optional[str] = None) -> dict:
 
     if os.path.exists(ckpt_path):
         os.remove(ckpt_path)  # clean up so future runs don't accidentally resume
+
+    # Persist final trained weights + the net_params needed to reconstruct this exact
+    # architecture, SEPARATELY from the (now-deleted) training-resume checkpoint above.
+    # Two things could not be done without this: (1) sensitivity.compute_sensitivity_curve
+    # on an already-finished result without retraining from scratch, and (2)
+    # scripts/calibrate_target_nodes.py's --backbone san mode, which needs a trained
+    # model's weights to load, the same way its GPS path loads a GraphGPS checkpoint.
+    # net_params includes a live torch.device object (net_params["device"]), which
+    # torch.save can't usefully round-trip across machines/processes -- strip it before
+    # saving; load_real_san (calibrate_target_nodes.py) re-adds the correct device at
+    # load time instead.
+    final_model_path = os.path.join(
+        run_cfg.results_dir,
+        f"model_{run_cfg.backbone}_{run_cfg.pe}_{run_cfg.dataset}_seed{run_cfg.seed}.pt")
+    net_params_to_save = {k: v for k, v in net_params.items() if k != "device"}
+    torch.save({"model_state": model.state_dict(), "net_params": net_params_to_save,
+               "best_metric": best_metric, "num_params": n_params},
+               final_model_path)
 
     return {
         "model": model,
@@ -1583,12 +1683,14 @@ def _build_loaders(run_cfg, net_params, train_params):
             sampler = EdgeBudgetBatchSampler(
                 node_counts, edge_budget=edge_budget, shuffle=(split == "train"),
                 seed=run_cfg.seed)
-            loaders.append(DataLoader(ds, batch_sampler=sampler, collate_fn=collate))
+            loaders.append(DataLoader(ds, batch_sampler=sampler, collate_fn=collate,
+                                      num_workers=4, pin_memory=True, persistent_workers=True))
         else:
             shuffle = split == "train"
             bs = train_params["batch_size"] if split == "train" else 16
             loaders.append(DataLoader(ds, batch_size=bs, shuffle=shuffle,
-                                      collate_fn=collate))
+                                      collate_fn=collate, num_workers=4, pin_memory=True,
+                                      persistent_workers=(split == "train")))
 
         if split == "test":
             # Built from the SAME underlying (post max_nodes filtering) dataset the
