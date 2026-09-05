@@ -351,6 +351,45 @@ def build_graphgym_cfg(run_cfg, graphgps_dir: str):
     return cfg
 
 
+def assert_gpu_if_slurm_allocated_one() -> None:
+    """Fail loudly when a GPU was allocated but torch cannot see it.
+
+    Nodes on a shared cluster turn up with broken CUDA -- a stale context from a previous
+    job, a driver that needs a reset -- and torch reports it as a warning, not an error:
+
+        UserWarning: CUDA initialization: CUDA unknown error ...
+        Setting the available devices to be zero.
+
+    auto_select_device() then quietly selects `cpu`, and the job runs. That is the bad
+    outcome, not a crash: training and the Jacobian sweep are 10-50x slower on CPU, so the
+    allocation burns its entire wall clock and is killed having produced nothing. The
+    numbers would have been correct; they just never arrive.
+
+    Only fires when Slurm actually gave us a GPU, so CPU-only work (build_cache.slurm
+    requests none) and laptop runs are unaffected.
+    """
+    import torch
+
+    allocated = None
+    for var in ("SLURM_JOB_GPUS", "SLURM_GPUS_ON_NODE", "CUDA_VISIBLE_DEVICES"):
+        value = os.environ.get(var, "").strip()
+        if value and value not in ("NoDevFiles", "0" * 0):
+            allocated = f"{var}={value}"
+            break
+    if allocated is None or torch.cuda.is_available():
+        return
+
+    raise RuntimeError(
+        f"Slurm allocated a GPU ({allocated}) but torch.cuda.is_available() is False, "
+        f"so this job would silently run on CPU -- 10-50x slower, which on a bounded "
+        f"wall clock means killed before finishing rather than merely slow. Look "
+        f"above for torch's 'CUDA initialization: CUDA unknown error' warning; it "
+        f"is usually a bad node rather than anything wrong here, so cancelling and "
+        f"resubmitting normally lands elsewhere. Check a node with: srun --gpus=1 "
+        f"--time=5 python -c 'import torch; print(torch.cuda.is_available())'. "
+        f"If you genuinely want CPU, submit without --gpus.")
+
+
 def patch_sklearn_squared_kwarg() -> bool:
     """Restore mean_squared_error(..., squared=False) for GraphGPS's regression logger.
 
@@ -549,6 +588,7 @@ def graphgps_train(run_cfg, graphgps_dir: Optional[str] = None) -> dict:
 
     seed_everything(cfg.seed)
     auto_select_device()
+    assert_gpu_if_slurm_allocated_one()
 
     # Point GraphGPS's loader at THIS repo's PE cache before it builds anything. Without
     # this the GPS arm trains on GraphGPS's own LapPE/RWSE/SignNet while the SAN arm

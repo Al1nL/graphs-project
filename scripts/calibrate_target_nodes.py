@@ -147,7 +147,9 @@ def load_real(backbone, pe, dataset, checkpoint, n_graphs):
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
     from config import RunConfig
     from run_experiment import make_model_fn, sample_test_graphs
-    from backends.graphgps_backend import build_graphgym_cfg, ensure_graphgps_importable
+    from backends.graphgps_backend import (assert_gpu_if_slurm_allocated_one,
+                                           build_graphgym_cfg,
+                                           ensure_graphgps_importable)
 
     graphgps_dir = ensure_graphgps_importable()
     from torch_geometric.graphgym.loader import create_loader
@@ -165,6 +167,10 @@ def load_real(backbone, pe, dataset, checkpoint, n_graphs):
     # inside its run loop before touching the loaders. graphgps_backend.graphgps_train
     # does too; this path replicated the rest of that setup and missed this one step.
     auto_select_device()
+    # A GPU allocation that torch cannot see would drop this sweep onto CPU, where it is
+    # slow enough to be killed by the wall clock rather than merely slow. Checked before
+    # create_loader, so the failure costs seconds instead of a dataset build.
+    assert_gpu_if_slurm_allocated_one()
     loaders = create_loader()
     model = create_model()
 

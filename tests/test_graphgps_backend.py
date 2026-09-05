@@ -883,6 +883,79 @@ def test_the_shim_is_a_no_op_on_an_sklearn_that_still_has_squared():
                 sys.modules[k] = v
 
 
+def test_a_gpu_allocation_torch_cannot_see_is_an_error_not_a_warning():
+    """Regression test for a wasted allocation.
+
+    A node came up with broken CUDA. torch reported it as a WARNING -- "CUDA
+    initialization: CUDA unknown error ... Setting the available devices to be zero" --
+    auto_select_device() quietly chose cpu, and the job ran on. That is worse than a
+    crash: the sweep is 10-50x slower on CPU, so a bounded wall clock kills it having
+    produced nothing, and the failure looks like a timeout rather than a bad node.
+    """
+    import os
+
+    import torch
+
+    saved = {v: os.environ.get(v) for v in
+             ("SLURM_JOB_GPUS", "SLURM_GPUS_ON_NODE", "CUDA_VISIBLE_DEVICES")}
+    try:
+        for v in saved:
+            os.environ.pop(v, None)
+
+        # nothing allocated -> silent, whatever torch reports. CPU-only jobs are normal:
+        # build_cache.slurm requests no GPU at all.
+        graphgps_backend.assert_gpu_if_slurm_allocated_one()
+
+        os.environ["SLURM_JOB_GPUS"] = "0"
+        if torch.cuda.is_available():
+            # a machine with a working GPU must NOT be told off
+            graphgps_backend.assert_gpu_if_slurm_allocated_one()
+        else:
+            try:
+                graphgps_backend.assert_gpu_if_slurm_allocated_one()
+            except RuntimeError as exc:
+                msg = str(exc)
+                assert "SLURM_JOB_GPUS=0" in msg, "the error must name what was allocated"
+                assert "CPU" in msg and "resubmit" in msg.lower(), (
+                    f"the error must say what went wrong and what to do: {msg}")
+            else:
+                raise AssertionError("a GPU allocation torch cannot see passed silently")
+
+        # "NoDevFiles" is Slurm's way of saying no devices were actually attached, and
+        # must not be read as an allocation
+        os.environ["CUDA_VISIBLE_DEVICES"] = "NoDevFiles"
+        os.environ.pop("SLURM_JOB_GPUS")
+        graphgps_backend.assert_gpu_if_slurm_allocated_one()
+    finally:
+        for v, val in saved.items():
+            if val is None:
+                os.environ.pop(v, None)
+            else:
+                os.environ[v] = val
+
+
+def test_both_gpu_entry_points_check_the_allocation():
+    """graphgps_train and calibrate's load_real both call auto_select_device(); both must
+    then verify it. Checked on the source, since neither runs without GraphGPS."""
+    import ast
+
+    for rel, funcs in (
+        (("src", "backends", "graphgps_backend.py"), ("graphgps_train",)),
+        (("scripts", "calibrate_target_nodes.py"), ("load_real",)),
+    ):
+        path = os.path.join(os.path.dirname(__file__), "..", *rel)
+        with open(path, encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        for name in funcs:
+            fn = next(n for n in ast.walk(tree)
+                      if isinstance(n, ast.FunctionDef) and n.name == name)
+            called = {n.func.id for n in ast.walk(fn)
+                      if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+            assert "assert_gpu_if_slurm_allocated_one" in called, (
+                f"{rel[-1]}:{name} selects a device without checking it is the one "
+                f"Slurm allocated")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
