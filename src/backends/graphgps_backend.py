@@ -351,6 +351,69 @@ def build_graphgym_cfg(run_cfg, graphgps_dir: str):
     return cfg
 
 
+def patch_sklearn_squared_kwarg() -> bool:
+    """Restore mean_squared_error(..., squared=False) for GraphGPS's regression logger.
+
+    scikit-learn deprecated `squared` in 1.4 and REMOVED it in 1.6. GraphGPS is pinned at
+    a Feb 2023 commit and still calls it, in exactly one place -- logger.py's regression
+    branch, for the 'rmse' stat. So the classification datasets are unaffected and
+    peptides-struct dies at the end of its first epoch with
+    `TypeError: got an unexpected keyword argument 'squared'`.
+
+    Patched here rather than fixed in either of the two places it looks like it belongs:
+
+      * NOT in the GraphGPS clone. It is a pinned fork -- config.PINNED_COMMITS -- and an
+        edit there is invisible to git, lost on a re-clone, and silently makes "we ran
+        upstream at commit X" false.
+      * NOT by downgrading the installed env. That would be the root fix and it IS pinned
+        in envs/graphgps_env.yml now for fresh builds, but the existing environment took
+        six rounds of conflicting pins to converge and a downgrade can drag numpy or
+        scipy with it. Repairing a working env mid-grid is a worse risk than a six-line
+        shim.
+
+    Semantics are exact, not approximate. Old `squared=False` took the square root PER
+    OUTPUT and then averaged; sqrt of the averaged MSE is a different number whenever
+    there is more than one target, and peptides-struct has eleven. sklearn >= 1.4 ships
+    root_mean_squared_error, which is precisely the old behaviour, so that is used when
+    present and the per-output computation is reproduced by hand otherwise.
+
+    Returns True if it patched anything, so the caller can say so rather than leaving a
+    silent monkeypatch in the run.
+    """
+    import inspect
+
+    import numpy as np
+
+    import graphgps.logger as gl
+
+    try:
+        if "squared" in inspect.signature(gl.mean_squared_error).parameters:
+            return False   # old enough sklearn: nothing to do
+    except (TypeError, ValueError):
+        return False       # unintrospectable; leave it alone rather than guess
+
+    original = gl.mean_squared_error
+    try:
+        from sklearn.metrics import root_mean_squared_error as _rmse
+    except ImportError:
+        _rmse = None
+
+    def mean_squared_error(y_true, y_pred, *, squared=True,
+                           multioutput="uniform_average", **kwargs):
+        if squared:
+            return original(y_true, y_pred, multioutput=multioutput, **kwargs)
+        if _rmse is not None:
+            return _rmse(y_true, y_pred, multioutput=multioutput, **kwargs)
+        per_output = original(y_true, y_pred, multioutput="raw_values", **kwargs)
+        rooted = np.sqrt(per_output)
+        if isinstance(multioutput, str):
+            return rooted if multioutput == "raw_values" else np.average(rooted)
+        return np.average(rooted, weights=multioutput)
+
+    gl.mean_squared_error = mean_squared_error
+    return True
+
+
 # ---------------------------------------------------------------------------
 # smoke testing
 # ---------------------------------------------------------------------------
@@ -435,6 +498,10 @@ def graphgps_train(run_cfg, graphgps_dir: Optional[str] = None) -> dict:
     from torch_geometric.graphgym.utils.device import auto_select_device
     from torch_geometric.graphgym.logger import set_printing
     from graphgps.logger import create_logger
+
+    if patch_sklearn_squared_kwarg():
+        print("  note: patched graphgps.logger.mean_squared_error for scikit-learn >= 1.6 "
+              "(the `squared` kwarg was removed); RMSE semantics are unchanged")
     from graphgps.optimizer.extra_optimizers import ExtendedSchedulerConfig
     from torch_geometric.graphgym.optim import OptimizerConfig
 

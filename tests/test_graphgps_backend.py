@@ -795,6 +795,94 @@ def test_a_test_split_without_a_val_split_refuses_to_guess():
             raise AssertionError("selected an epoch without a validation split")
 
 
+def test_sklearn_squared_shim_reproduces_the_old_semantics():
+    """scikit-learn removed mean_squared_error's `squared` kwarg in 1.6; GraphGPS still
+    calls it, and peptides-struct died at the end of epoch 0 with
+    `TypeError: got an unexpected keyword argument 'squared'`.
+
+    The exactness matters and is easy to get wrong. Old squared=False took the square
+    root PER OUTPUT and then averaged. sqrt of the averaged MSE is a different number as
+    soon as there is more than one target -- and peptides-struct has eleven. A shim that
+    did the easy thing would run fine and report a subtly wrong RMSE every epoch.
+    """
+    import sys
+    import types
+
+    import numpy as np
+
+    # a new-style sklearn: no `squared` parameter
+    def modern_mse(y_true, y_pred, *, multioutput="uniform_average", sample_weight=None):
+        per_output = np.average((np.asarray(y_true) - np.asarray(y_pred)) ** 2, axis=0,
+                                weights=sample_weight)
+        if isinstance(multioutput, str):
+            return per_output if multioutput == "raw_values" else np.average(per_output)
+        return np.average(per_output, weights=multioutput)
+
+    fake = types.ModuleType("graphgps.logger")
+    fake.mean_squared_error = modern_mse
+    saved = {k: sys.modules.get(k) for k in ("graphgps", "graphgps.logger")}
+    pkg = sys.modules.get("graphgps") or types.ModuleType("graphgps")
+    pkg.logger = fake
+    sys.modules["graphgps"] = pkg
+    sys.modules["graphgps.logger"] = fake
+    try:
+        assert graphgps_backend.patch_sklearn_squared_kwarg() is True
+
+        # eleven targets with deliberately UNEQUAL per-output errors, so the two
+        # orderings of sqrt and average disagree
+        rng = np.random.default_rng(0)
+        y_true = rng.normal(size=(64, 11))
+        y_pred = y_true + rng.normal(size=(64, 11)) * np.linspace(0.1, 3.0, 11)
+
+        got = fake.mean_squared_error(y_true, y_pred, squared=False)
+
+        per_output = modern_mse(y_true, y_pred, multioutput="raw_values")
+        want = np.average(np.sqrt(per_output))          # sqrt first, then average
+        naive = np.sqrt(np.average(per_output))         # the tempting wrong one
+
+        assert abs(got - want) < 1e-12, f"got {got}, old sklearn would give {want}"
+        assert abs(want - naive) > 1e-3, (
+            "fixture is degenerate: the two orderings must differ for this to test "
+            "anything")
+
+        # squared=True must be untouched
+        assert abs(fake.mean_squared_error(y_true, y_pred)
+                   - modern_mse(y_true, y_pred)) < 1e-12
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+
+
+def test_the_shim_is_a_no_op_on_an_sklearn_that_still_has_squared():
+    """An older env needs no patching, and patching it anyway would replace a tested
+    implementation with ours for no reason."""
+    import sys
+    import types
+
+    def old_mse(y_true, y_pred, *, squared=True, multioutput="uniform_average"):
+        return 0.0
+
+    fake = types.ModuleType("graphgps.logger")
+    fake.mean_squared_error = old_mse
+    saved = {k: sys.modules.get(k) for k in ("graphgps", "graphgps.logger")}
+    pkg = sys.modules.get("graphgps") or types.ModuleType("graphgps")
+    pkg.logger = fake
+    sys.modules["graphgps"] = pkg
+    sys.modules["graphgps.logger"] = fake
+    try:
+        assert graphgps_backend.patch_sklearn_squared_kwarg() is False
+        assert fake.mean_squared_error is old_mse
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

@@ -172,7 +172,12 @@ dependencies:
   # headless compute node cannot use anyway. scripts/aggregate_results.py only ever
   # writes files, so Agg is sufficient.
   - matplotlib-base
-  - scikit-learn
+  # <1.6: GraphGPS's regression logger calls mean_squared_error(..., squared=False),
+  # deprecated in 1.4 and removed in 1.6. Unpinned it resolved to >=1.6 and every
+  # peptides-struct run died at the end of epoch 0. backends/graphgps_backend
+  # .patch_sklearn_squared_kwarg keeps an already-built env working; this is the fix for
+  # fresh ones.
+  - scikit-learn<1.6
   - joblib
 
   - pip:
