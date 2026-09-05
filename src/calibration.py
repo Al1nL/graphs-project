@@ -322,6 +322,38 @@ def report_sentence(rec: Dict, rows: List[Dict], d_min: int, d_max: int) -> str:
             f"extend the ladder past {ref['T']} and re-run."
         )
     ladder = [r["T"] for r in sorted(rows, key=lambda r: r["T"])]
+
+    # Every clause below is phrased "relative to the densest sampling T=<ref>". That
+    # phrasing is only true while the reference rung actually IS denser sampling. Once T
+    # exceeds a graph's node count, randperm(n)[:T] returns all n nodes, so the rung
+    # enumerates rather than samples -- a different estimator, which is why
+    # recommend_target_nodes already warns about it in `reason`.
+    #
+    # This sentence is written to be pasted into a paper, and it was dropping that
+    # caveat: on a real calibration it read "relative to the densest sampling T=256"
+    # while 7 of 10 graphs at that rung had been exhaustively enumerated. Stating an
+    # unqualified stability claim that the tool itself had qualified two lines earlier is
+    # the one failure mode a report helper must not have.
+    ref_saturated = ref["graphs_saturated"]
+    caveat = ""
+    if ref_saturated:
+        if ref_saturated == n_graphs:
+            caveat = (
+                f" This comparison is against an EXHAUSTIVE rung, not a denser sample: at "
+                f"T={ref['T']} every calibration graph has fewer than {ref['T']} nodes, so "
+                f"the reference enumerates all node pairs. The stability claim is "
+                f"therefore against the exact per-graph value, which is stronger than "
+                f"convergence in T but is not the same statement; re-run with a ladder "
+                f"whose top rung is below the smallest graph if you need the weaker one."
+            )
+        else:
+            caveat = (
+                f" Caveat: the reference rung is saturated on {ref_saturated} of "
+                f"{n_graphs} calibration graphs -- for those, T={ref['T']} enumerates every "
+                f"node rather than sampling more of them, so the reference mixes two "
+                f"estimators. Re-run with a top rung below the smallest graph's node count "
+                f"before quoting this."
+            )
     # Name the constraint that actually bound. Reporting only the rho-stability clause
     # when a different criterion selected T would overstate what was verified.
     binding = {
@@ -345,5 +377,5 @@ def report_sentence(rec: Dict, rows: List[Dict], d_min: int, d_max: int) -> str:
     return (
         f"We verified that rho is stable in the number of sampled target nodes: sweeping T "
         f"over {ladder} on {n_graphs} test graphs, {binding}. We use "
-        f"T={rec['recommended_T']}."
+        f"T={rec['recommended_T']}.{caveat}"
     )

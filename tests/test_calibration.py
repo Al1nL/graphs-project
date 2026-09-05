@@ -319,6 +319,48 @@ def test_load_real_resolves_the_accelerator_before_building_the_model():
                     f"{fn.name}(): auto_select_device() must precede {consumer}()")
 
 
+def test_paper_sentence_carries_the_saturation_caveat():
+    """The sentence is written to be pasted into a paper, and it was dropping the one
+    qualification that matters.
+
+    On a real calibration it read "relative to the densest sampling T=256" while 7 of 10
+    graphs at that rung had every node enumerated -- an exhaustive rung, not a denser
+    sample. recommend_target_nodes already warned about exactly this in `reason`; the
+    report helper stated the conclusion without it.
+    """
+    rows = _rows([0.20, 0.24, 0.2695, 0.2700, 0.2701, 0.2700], ci_width=0.01)
+    rows[-1]["graphs_saturated"] = 7          # the reference rung only
+    rec = recommend_target_nodes(rows, tol=0.5)
+    sentence = report_sentence(rec, rows, 26, 80)
+
+    assert "saturated on 7 of 10" in sentence, sentence
+    assert "enumerates" in sentence, sentence
+    # and it must still say what T to use
+    assert f"T={rec['recommended_T']}" in sentence
+
+
+def test_a_fully_saturated_reference_is_described_as_exhaustive_not_broken():
+    """When EVERY graph is enumerated the reference is the exact per-graph value, which
+    is a stronger claim than convergence in T -- but a different one, so it has to be
+    named rather than silently reported as stability."""
+    rows = _rows([0.20, 0.24, 0.2695, 0.2700, 0.2701, 0.2700], ci_width=0.01)
+    rows[-1]["graphs_saturated"] = rows[-1]["n_graphs"]     # every graph enumerated
+    sentence = report_sentence(recommend_target_nodes(rows, tol=0.5), rows, 26, 80)
+
+    assert "EXHAUSTIVE" in sentence, sentence
+    assert "exact per-graph value" in sentence, sentence
+
+
+def test_an_unsaturated_reference_adds_no_caveat():
+    """The caveat must not appear when it does not apply, or it becomes noise people
+    learn to paste past."""
+    rows = _rows([0.20, 0.24, 0.2695, 0.2700, 0.2701, 0.2700], ci_width=0.01)
+    sentence = report_sentence(recommend_target_nodes(rows, tol=0.5), rows, 26, 80)
+
+    assert "saturat" not in sentence.lower(), sentence
+    assert "Caveat" not in sentence, sentence
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
