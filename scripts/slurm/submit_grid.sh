@@ -8,8 +8,21 @@
 # Usage:
 #   scripts/slurm/submit_grid.sh gps 32                       # backbone=gps, T=32
 #   scripts/slurm/submit_grid.sh san 32 --partition=studentkillable --throttle=2
-#   scripts/slurm/submit_grid.sh gps 32 --pe none,lappe        # only these PEs (fewer cells)
+#   scripts/slurm/submit_grid.sh gps 32 --pe=none,lappe        # only these PEs (fewer cells)
+#   scripts/slurm/submit_grid.sh gps 32 --dataset=peptides-func  # only this dataset
 #   scripts/slurm/submit_grid.sh gps 32 --dry-run              # print the sbatch command, submit nothing
+#
+# --pe and --dataset INTERSECT, so `--dataset=peptides-func --pe=none,lappe,rwse,signnet`
+# is the 12 cells of that dataset runnable today (grpe is not a drop-in on either backbone).
+#
+# Why --dataset exists, beyond convenience: one array submission carries ONE
+# NUM_TARGET_NODES, and T is calibrated per (backbone, dataset) -- whether a given T
+# populates the rho window depends on graph topology, which differs sharply between
+# 150-node peptide chains and 479-node superpixel graphs. Honouring that means one
+# submission per dataset. The index blocks happen to be contiguous (dataset is the
+# outermost axis), so --array-range could do it by hand; the point of the flag is that a
+# mistyped index is INVISIBLE -- the wrong cell trains perfectly well and records a T it
+# was never calibrated for.
 #
 # Positional args: BACKBONE (gps|san), NUM_TARGET_NODES (from calibrate_target_nodes.py).
 # Everything else is an optional flag with a TAU-appropriate default (see below).
@@ -39,6 +52,7 @@ CONSTRAINT=""                 # e.g. "a5000|a6000|l40s" -- empty = any GPU node
 RESULTS_DIR="results"
 NUM_PROBE_GRAPHS=""
 PE_LIST=""                    # non-empty -> filters run_grid.slurm's PES array client-side
+DS_LIST=""                    # non-empty -> filters its DATASETS array the same way
 DRY_RUN=0
 ACCOUNT="gpu-students"
 CONDA_BASE=""                 # conda installation root; empty -> job asks `conda info
@@ -60,6 +74,7 @@ while [ $# -gt 0 ]; do
     --results-dir=*) RESULTS_DIR="${1#*=}" ;;
     --num-probe-graphs=*) NUM_PROBE_GRAPHS="${1#*=}" ;;
     --pe=*) PE_LIST="${1#*=}" ;;
+    --dataset=*) DS_LIST="${1#*=}" ;;
     --dry-run) DRY_RUN=1 ;;
     *) echo "unknown flag: $1" >&2; exit 1 ;;
   esac
@@ -90,34 +105,69 @@ if [ ! -d "cache/peptides-func" ] || [ ! -d "cache/peptides-struct" ] || [ ! -d 
   echo "  array task will fail pre-flight otherwise." >&2
 fi
 
-if [ -n "$PE_LIST" ]; then
+_in_list() {   # _in_list <needle> <item>...
+  local needle="$1"; shift
+  local x
+  for x in "$@"; do [ "$x" = "$needle" ] && return 0; done
+  return 1
+}
+
+if [ -n "$PE_LIST" ] || [ -n "$DS_LIST" ]; then
   # Recompute the same index mapping run_grid.slurm uses (PES x SEEDS x DATASETS, dataset
-  # outermost) to turn a PE name list into the matching comma-separated Slurm array
-  # indices, e.g. --pe=none,lappe -> "0,1,5,6,10,11,...". Kept as a literal re-derivation
-  # (not a shared script) because it is 6 lines of arithmetic and importing bash logic
-  # from run_grid.slurm here would be more fragile than just keeping the two in sync by
-  # eye -- if you change PES there, change ALL_PES here too.
+  # outermost) to turn name lists into Slurm array indices, e.g.
+  # --dataset=peptides-func --pe=none,lappe -> "0,1,5,6,10,11". Kept as a literal
+  # re-derivation rather than shared with run_grid.slurm: it is a dozen lines of
+  # arithmetic, and importing bash logic across the two would be more fragile than keeping
+  # them in sync by eye. Change PES or DATASETS there and change ALL_PES / ALL_DS here.
   ALL_PES=(none lappe rwse signnet grpe)
-  N_PE=${#ALL_PES[@]}; N_SEED=3; N_DS=3
-  IFS=',' read -ra WANTED <<< "$PE_LIST"
+  ALL_DS=(peptides-func peptides-struct pascalvoc-sp)
+  N_PE=${#ALL_PES[@]}; N_SEED=3; N_DS=${#ALL_DS[@]}
+
+  if [ "$ARRAY_RANGE" != "0-44" ]; then
+    # Refuse rather than silently pick one. --pe used to overwrite --array-range without a
+    # word, so a submission carrying both ran something the command line did not say.
+    echo "--array-range cannot be combined with --pe/--dataset: they set the same thing." >&2
+    echo "  Drop --array-range, or drop the filters and pass explicit indices." >&2
+    exit 1
+  fi
+
+  # An unset filter means "all of that axis", which is what makes the two intersect.
+  if [ -n "$PE_LIST" ]; then IFS=',' read -ra WANT_PE <<< "$PE_LIST"
+  else WANT_PE=("${ALL_PES[@]}"); fi
+  if [ -n "$DS_LIST" ]; then IFS=',' read -ra WANT_DS <<< "$DS_LIST"
+  else WANT_DS=("${ALL_DS[@]}"); fi
+
+  # Validate every name up front. The previous version matched names by scanning, so a
+  # typo in a list simply contributed nothing and ran a SMALLER grid than asked for,
+  # silently -- which on a 45-cell submission is not something you notice.
+  for w in "${WANT_PE[@]}"; do
+    _in_list "$w" "${ALL_PES[@]}" || {
+      echo "--pe: unknown PE '$w' (known: ${ALL_PES[*]})" >&2; exit 1; }
+  done
+  for w in "${WANT_DS[@]}"; do
+    _in_list "$w" "${ALL_DS[@]}" || {
+      echo "--dataset: unknown dataset '$w' (known: ${ALL_DS[*]})" >&2; exit 1; }
+  done
+
   indices=()
   for ds_i in $(seq 0 $((N_DS - 1))); do
+    _in_list "${ALL_DS[$ds_i]}" "${WANT_DS[@]}" || continue
     for seed_i in $(seq 0 $((N_SEED - 1))); do
       for pe_i in "${!ALL_PES[@]}"; do
-        for w in "${WANTED[@]}"; do
-          if [ "${ALL_PES[$pe_i]}" = "$w" ]; then
-            indices+=($(( ds_i * N_PE * N_SEED + seed_i * N_PE + pe_i )))
-          fi
-        done
+        _in_list "${ALL_PES[$pe_i]}" "${WANT_PE[@]}" || continue
+        indices+=($(( ds_i * N_PE * N_SEED + seed_i * N_PE + pe_i )))
       done
     done
   done
-  if [ "${#indices[@]}" -eq 0 ]; then
-    echo "--pe=$PE_LIST matched no known PE name (known: ${ALL_PES[*]})" >&2
-    exit 1
-  fi
+
   ARRAY_RANGE="$(IFS=,; echo "${indices[*]}")"
-  echo "--pe=$PE_LIST -> ${#indices[@]} cells -> --array=$ARRAY_RANGE"
+  echo "filter: --pe=${PE_LIST:-<all>}  --dataset=${DS_LIST:-<all>}"
+  echo "        -> ${#indices[@]} cells -> --array=$ARRAY_RANGE"
+  if [ "${#WANT_DS[@]}" -gt 1 ]; then
+    echo "        NOTE: spans ${#WANT_DS[@]} datasets on ONE NUM_TARGET_NODES"          "($NUM_TARGET_NODES)." >&2
+    echo "        T is calibrated per (backbone, dataset); submit one array per dataset" >&2
+    echo "        to give each its own." >&2
+  fi
 fi
 
 EXPORT_VARS="BACKBONE=$BACKBONE,NUM_TARGET_NODES=$NUM_TARGET_NODES,RESULTS_DIR=$RESULTS_DIR"
