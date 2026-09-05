@@ -131,6 +131,136 @@ def lap_to_graphgps(lap_pe, eigvals, num_nodes: int, k_lap: int):
     return vals, vecs
 
 
+# Bumped whenever the consolidated file's LAYOUT changes. Distinct from
+# PE_CACHE_VERSION, which versions the SOURCE cache: a consolidated file is stale if
+# either moves, and both are recorded in it.
+FAST_CACHE_LAYOUT_VERSION = 1
+
+
+class FastPECache:
+    """One split's PE tensors in a single file, instead of three .npy per graph.
+
+    WHY. The source cache stores one file per graph per array, which is the right shape
+    for building it incrementally and the wrong shape for reading it 15,535 times over
+    NFS. Every PECache[i] costs three file opens (node, spd, eig) and, because
+    __getitem__ builds its whole dict eagerly, two [n, n] materialisations
+    (spd_bucket, edge_type_id) that the GraphGPS path never looks at. Measured on the
+    cluster the pre-transform ran between 2.5 and 15 minutes for identical work, the
+    spread tracking filesystem contention rather than compute -- ~31,000 opens where
+    per-file latency dominates. Paid once per CELL, that is hours across a 36-cell grid.
+
+    Consolidating turns it into one sequential read of a few hundred MB, and is built
+    once per DATASET rather than once per cell.
+
+    WHAT IS AND IS NOT STORED. Node features and eigenvalues, which the encoders consume.
+    NOT spd: it is [n, n] uint8, which for VOC would be gigabytes, and the GraphGPS path
+    reads it for exactly one scalar -- the edge count used to verify alignment. That
+    scalar is computed during the build and stored, so spd is read once here and never
+    again at run time. The alignment check keeps its second, independent fingerprint at
+    a cost of 8 bytes per graph.
+
+    CORRECTNESS. The file records the source manifest's pe_cache_version, k_lap, k_rwse
+    and graph count, plus this layout version. Any mismatch rebuilds rather than adapts:
+    a consolidated file that silently disagreed with the cache it was derived from would
+    reintroduce exactly the class of error this module exists to prevent, one level
+    further from view.
+    """
+
+    def __init__(self, cache_dir: str, split: str, fast_dir: str):
+        self._src = PECache(cache_dir, split)
+        self.manifest = self._src.manifest
+        self.k_lap = self._src.k_lap
+        self.split = split
+        self._n = len(self._src)
+        self._path = os.path.join(fast_dir, f"{split}_pe_v{FAST_CACHE_LAYOUT_VERSION}.pt")
+        self._blob = None
+
+    def __len__(self):
+        return self._n
+
+    def _expected_meta(self):
+        return {
+            "layout_version": FAST_CACHE_LAYOUT_VERSION,
+            "pe_cache_version": self.manifest.get("pe_cache_version"),
+            "k_lap": self.manifest["k_lap"],
+            "k_rwse": self.manifest["k_rwse"],
+            "n_graphs": self._n,
+            "split": self.split,
+        }
+
+    def _load_or_build(self):
+        if self._blob is not None:
+            return self._blob
+
+        want = self._expected_meta()
+        if os.path.exists(self._path):
+            blob = torch.load(self._path, map_location="cpu")
+            if blob.get("meta") == want:
+                self._blob = blob
+                return blob
+            print(f"  PE fast-cache at {self._path} is stale "
+                  f"(has {blob.get('meta')}, need {want}); rebuilding")
+
+        print(f"  building PE fast-cache for split '{self.split}' "
+              f"({self._n} graphs) -> {self._path}")
+        node_parts, eigs, num_nodes, num_edges = [], [], [], []
+        for i in range(self._n):
+            rec = self._src[i]
+            node = np.asarray(rec["lap_pe"])          # [n, k_lap]
+            rwse = np.asarray(rec["rwse"])            # [n, k_rwse]
+            node_parts.append(torch.from_numpy(
+                np.ascontiguousarray(np.concatenate([node, rwse], axis=1),
+                                     dtype=np.float32)))
+            eigs.append(torch.from_numpy(
+                np.array(rec["lap_eigvals"], dtype=np.float32)))
+            num_nodes.append(node.shape[0])
+            # the one thing spd is needed for; computed here so it is never read again
+            num_edges.append(int((np.asarray(rec["spd"]) == 1).sum()))
+
+        sizes = torch.tensor(num_nodes, dtype=torch.long)
+        blob = {
+            "meta": want,
+            "node": torch.cat(node_parts, dim=0) if node_parts
+                    else torch.zeros(0, self.k_lap + self.manifest["k_rwse"]),
+            "offsets": torch.cat([torch.zeros(1, dtype=torch.long), sizes.cumsum(0)]),
+            "eig": torch.stack(eigs) if eigs else torch.zeros(0, self.k_lap),
+            "num_nodes": sizes,
+            "num_edges": torch.tensor(num_edges, dtype=torch.long),
+        }
+
+        try:
+            os.makedirs(os.path.dirname(self._path) or ".", exist_ok=True)
+            tmp = self._path + ".tmp"
+            torch.save(blob, tmp)
+            os.replace(tmp, self._path)   # atomic: a killed job leaves no half file
+        except OSError as exc:
+            # The shared cache commonly lives in someone else's read-only tree, and the
+            # fast dir may be unwritable for the same reason. Not fatal: the run has the
+            # data in memory and proceeds, it just pays the build again next time.
+            print(f"  WARNING: could not write {self._path} ({exc}); this run is "
+                  f"unaffected but the next one rebuilds. Set PE_FASTCACHE_DIR to a "
+                  f"writable path to persist it.")
+
+        self._blob = blob
+        return blob
+
+    def __getitem__(self, i):
+        blob = self._load_or_build()
+        if not 0 <= i < self._n:
+            raise IndexError(f"graph {i} out of range for split '{self.split}' ({self._n})")
+        lo = int(blob["offsets"][i])
+        hi = int(blob["offsets"][i + 1])
+        node = blob["node"][lo:hi]
+        return {
+            "lap_pe": node[:, : self.k_lap],
+            "rwse": node[:, self.k_lap:],
+            "signnet_in": node[:, : self.k_lap],
+            "lap_eigvals": blob["eig"][i],
+            "num_nodes": int(blob["num_nodes"][i]),
+            "num_edges": int(blob["num_edges"][i]),
+        }
+
+
 class CachedPosencStats:
     """Drop-in replacement for graphgps.transform.posenc_stats.compute_posenc_stats.
 
@@ -141,8 +271,14 @@ class CachedPosencStats:
     eigendecomposition, and we are not doing one.
     """
 
-    def __init__(self, cache_dir: str):
-        self.caches = {s: PECache(cache_dir, s) for s in SPLIT_ORDER}
+    def __init__(self, cache_dir: str, fast_dir: str = None):
+        # fast_dir opt-in rather than default-on: PECache is the reference reader, and a
+        # caller that wants the plain per-graph path (the tests, anything diagnosing the
+        # cache itself) should not have to opt out of a consolidation layer.
+        if fast_dir:
+            self.caches = {s: FastPECache(cache_dir, s, fast_dir) for s in SPLIT_ORDER}
+        else:
+            self.caches = {s: PECache(cache_dir, s) for s in SPLIT_ORDER}
         self.sizes = {s: len(self.caches[s]) for s in SPLIT_ORDER}
         # Widths come from the manifest, never from a constant duplicated here: the cache
         # on disk is the authority on how wide the cache on disk is. A K_LAP edited in
@@ -244,7 +380,11 @@ class CachedPosencStats:
         # representation. Node count alone is a weak fingerprint -- molecules of equal
         # size are common -- so a mapping that is subtly rather than grossly wrong could
         # slip past it.
-        cached_edges = int((np.asarray(rec["spd"]) == 1).sum())
+        # FastPECache precomputes this at build time so spd -- [n, n] uint8, gigabytes
+        # for VOC -- never has to be read at run time. PECache still carries the matrix,
+        # so both readers answer the same question the same way.
+        cached_edges = (int(rec["num_edges"]) if "num_edges" in rec
+                        else int((np.asarray(rec["spd"]) == 1).sum()))
         num_edges = int(data.edge_index.shape[1]) if hasattr(data, "edge_index") else -1
 
         if cached_nodes != num_nodes or (num_edges >= 0 and cached_edges != num_edges):
@@ -305,7 +445,13 @@ def install(run_cfg, cfg=None) -> CachedPosencStats:
 
     # No parentheses: resolved_cache_dir is a @property on RunConfig, unlike its
     # resolved_max_dist()/resolved_num_probe_graphs() neighbours, which are plain methods.
-    stats = CachedPosencStats(run_cfg.resolved_cache_dir)
+    # Consolidated reader by default. PE_FASTCACHE_DIR overrides where it lands, which
+    # matters because the source cache is usually a symlink into a teammate's read-only
+    # tree -- writing next to it is not an option.
+    fast_dir = os.environ.get(
+        "PE_FASTCACHE_DIR",
+        os.path.join("cache_fast", getattr(run_cfg, "dataset", "unknown")))
+    stats = CachedPosencStats(run_cfg.resolved_cache_dir, fast_dir=fast_dir)
 
     if cfg is not None:
         for key in ("posenc_LapPE", "posenc_SignNet"):

@@ -3,6 +3,9 @@ __pycache__/
 
 # Precomputed PE tensors and raw LRGB downloads -- regenerate with src/pe/compute_pe.py
 cache/
+# Consolidated PE tensors, derived from cache/ by backends/graphgps_pe_cache.FastPECache.
+# Hundreds of MB per dataset and reproducible from the source cache in one pass.
+cache_fast/
 raw_data/
 
 # Run outputs. Must be `results/*`, not `results/`: git never descends into an EXCLUDED

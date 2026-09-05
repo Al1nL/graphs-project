@@ -481,6 +481,107 @@ def test_split_idxs_that_disagree_with_the_cache_size_are_rejected():
             _unstub(saved)
 
 
+def test_fast_cache_serves_the_same_records_as_the_per_graph_reader():
+    """The consolidated reader must be a pure optimisation: same numbers, fewer reads.
+
+    Checked against PECache itself rather than against expected values, because the point
+    is equivalence with the reference reader, not agreement with a second transcription
+    of the fixture.
+    """
+    import numpy as np
+    import tempfile
+
+    from backends.graphgps_pe_cache import CachedPosencStats, FastPECache
+    from pe.cache import PECache
+
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        cache_dir = os.path.join(tmp, "cache")
+        _write_cache(cache_dir, {"train": 2, "val": 1, "test": 2},
+                     {"train": [4, 6], "val": [5], "test": [7, 3]})
+        fast_dir = os.path.join(tmp, "fast")
+
+        for split in ("train", "val", "test"):
+            slow = PECache(cache_dir, split)
+            fast = FastPECache(cache_dir, split, fast_dir)
+            assert len(fast) == len(slow)
+
+            for i in range(len(slow)):
+                a, b = slow[i], fast[i]
+                for key in ("lap_pe", "rwse", "signnet_in", "lap_eigvals"):
+                    assert np.allclose(np.asarray(a[key]), np.asarray(b[key])), (
+                        f"{split}[{i}].{key} differs between the two readers")
+                # the edge count the alignment check uses, precomputed instead of
+                # recomputed from the [n, n] spd matrix
+                assert b["num_edges"] == int((np.asarray(a["spd"]) == 1).sum())
+                assert b["num_nodes"] == np.asarray(a["lap_pe"]).shape[0]
+
+    print("PASS  test_fast_cache_serves_the_same_records_as_the_per_graph_reader")
+
+
+def test_fast_cache_persists_and_is_reused():
+    """Written once, read thereafter -- that reuse IS the optimisation. Also checks the
+    build does not silently re-run, which would leave the cost exactly where it was."""
+    import tempfile
+
+    from backends.graphgps_pe_cache import FAST_CACHE_LAYOUT_VERSION, FastPECache
+
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        cache_dir = os.path.join(tmp, "cache")
+        _write_cache(cache_dir, {"train": 2, "val": 1, "test": 1},
+                     {"train": [4, 6], "val": [5], "test": [7]})
+        fast_dir = os.path.join(tmp, "fast")
+
+        first = FastPECache(cache_dir, "train", fast_dir)
+        _ = first[0]
+        path = os.path.join(fast_dir, f"train_pe_v{FAST_CACHE_LAYOUT_VERSION}.pt")
+        assert os.path.exists(path), "the consolidated file was never written"
+
+        # a second reader must load that file rather than walk the per-graph cache again
+        import pe.cache as pe_cache_mod
+
+        original = pe_cache_mod.PECache._load
+        pe_cache_mod.PECache._load = lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("fast cache rebuilt instead of loading the persisted file"))
+        try:
+            second = FastPECache(cache_dir, "train", fast_dir)
+            assert second[0]["num_nodes"] == first[0]["num_nodes"]
+        finally:
+            pe_cache_mod.PECache._load = original
+
+    print("PASS  test_fast_cache_persists_and_is_reused")
+
+
+def test_a_stale_fast_cache_is_rebuilt_not_trusted():
+    """A consolidated file disagreeing with the cache it came from would reintroduce the
+    misalignment class of bug one level further from view, so mismatched metadata must
+    rebuild rather than adapt."""
+    import tempfile
+
+    import torch
+
+    from backends.graphgps_pe_cache import FAST_CACHE_LAYOUT_VERSION, FastPECache
+
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        cache_dir = os.path.join(tmp, "cache")
+        _write_cache(cache_dir, {"train": 2, "val": 1, "test": 1},
+                     {"train": [4, 6], "val": [5], "test": [7]})
+        fast_dir = os.path.join(tmp, "fast")
+
+        _ = FastPECache(cache_dir, "train", fast_dir)[0]
+        path = os.path.join(fast_dir, f"train_pe_v{FAST_CACHE_LAYOUT_VERSION}.pt")
+
+        blob = torch.load(path, map_location="cpu")
+        blob["meta"]["k_lap"] = blob["meta"]["k_lap"] + 1     # pretend the cache moved
+        blob["node"] = blob["node"][:1] * 0                   # and corrupt the payload
+        torch.save(blob, path)
+
+        rebuilt = FastPECache(cache_dir, "train", fast_dir)[0]
+        assert rebuilt["num_nodes"] == 4, (
+            "a stale consolidated file was trusted instead of rebuilt")
+
+    print("PASS  test_a_stale_fast_cache_is_rebuilt_not_trusted")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(list(globals().items())):
         if name.startswith("test_") and callable(fn):
