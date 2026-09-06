@@ -130,6 +130,7 @@ DATASETS = {
         "avg_nodes": 150,          # measured 150.0 (paper: 151)
         "avg_diameter": 57,        # measured 56.5; median 51, p90 95
         "median_diameter": 51,
+        "p90_diameter": 95,        # d_max must stay at or below this -- see the note above
         "max_diameter": 159,       # exact, all splits, from the cache manifest
         "max_dist": 159,           # == max_diameter: relative tail complete for every graph
         "abs_rho_window": (26, 80),   # reported window; d_min ~ half the MEDIAN diameter
@@ -138,6 +139,7 @@ DATASETS = {
         "avg_nodes": 150,
         "avg_diameter": 57,
         "median_diameter": 51,
+        "p90_diameter": 95,
         "max_diameter": 159,
         "max_dist": 159,
         "abs_rho_window": (26, 80),
@@ -146,13 +148,31 @@ DATASETS = {
         "avg_nodes": 480,          # measured 480.4
         "avg_diameter": 28,        # measured 27.7; tight -- median 28
         "median_diameter": 28,
+        "p90_diameter": 30,        # measured on 256 test graphs, 2026-09-06
         "max_diameter": 54,        # exact, all splits (a 400-graph sample said 36)
         # Raised 36 -> 54 for the SAME reason as Peptides, though the request named only
         # Peptides: at 36, graphs of diameter 37..54 had partially sampled relative tails
         # and the identical downward bias. Leaving one dataset with a defect just argued to
         # be unacceptable in the other would be incoherent. Revert to 36 if unwanted.
         "max_dist": 54,
-        "abs_rho_window": (14, 36),   # reported window unchanged
+        # 36 -> 28. The old d_max was the MAXIMUM diameter of a 400-graph sample, i.e. the
+        # single most extreme graph, so the top of the window was populated only by rare
+        # outliers. Measured on 256 test graphs (2026-09-06): median 28, p90 30, p99 34,
+        # max 36. Roughly 1% of graphs reach 34, and whether their far pairs get sampled
+        # depends on T -- so rho ratcheted upward as buckets crossed from empty to
+        # populated and calibration never converged, ending with
+        # "rho had not converged in T by T=128".
+        #
+        # 28 is the MEDIAN diameter: report over distances at least half the graphs
+        # actually contain. Projected bucket counts for a 256-graph probe at T=8, scaled
+        # from a measured 8-graph run: d=26 ~1300, d=27 ~660, d=28 ~150, d=29 ~40,
+        # d=30 ~8. So 28 leaves every in-window bucket estimable and 30 does not.
+        #
+        # Peptides needs no such change and shows why: its d_max of 80 sits BELOW its p90
+        # diameter of 95, so many graphs realise it, and both its calibrations converged.
+        # VOC's 36 sat above its p99. That is the invariant -- d_max <= p90_diameter --
+        # and it is now asserted in tests/test_distance_axis.py.
+        "abs_rho_window": (14, 28),
     },
 }
 

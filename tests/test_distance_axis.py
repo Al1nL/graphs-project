@@ -259,6 +259,44 @@ def test_no_hardcoded_caps_remain_in_src():
     assert not offenders, f"hardcoded spd cap still present: {offenders}"
 
 
+def test_reported_window_stays_within_reachable_distances():
+    """d_max must be a distance a substantial fraction of graphs actually contain.
+
+    Regression test for a VOC calibration that could not converge. Its d_max was 36 --
+    the MAXIMUM diameter of a 400-graph sample, i.e. the single most extreme graph -- so
+    the top of the window was populated only by rare outliers. Measured on 256 test
+    graphs: median 28, p90 30, p99 34, max 36.
+
+    That is not a sampling problem and no T fixes it. long_range_fraction drops empty
+    buckets from BOTH sums, so as T rises and a rare far bucket crosses from empty to
+    populated, it re-enters the ratio and rho steps upward. The sweep ended with "rho had
+    not converged in T by T=128" after ratcheting 0.355 -> 0.387 at the densest rung.
+
+    p90 is the line because peptides shows both sides of it: its d_max of 80 sits BELOW
+    its p90 of 95, many graphs realise it, and both peptides calibrations converged
+    cleanly at T=8 and T=32. VOC's 36 sat above its p99.
+    """
+    from dataset_meta import DATASETS, abs_rho_window
+
+    for dataset, meta in DATASETS.items():
+        d_min, d_max = abs_rho_window(dataset)
+        p90 = meta["p90_diameter"]
+
+        assert 1 <= d_min < d_max, f"{dataset}: nonsensical window ({d_min}, {d_max})"
+        assert d_max <= p90, (
+            f"{dataset}: d_max={d_max} exceeds the p90 diameter ({p90}), so the top of "
+            f"the reported window is realised by under 10% of graphs. rho will drift "
+            f"with T there rather than converge -- narrow d_max, do not raise T")
+        assert d_max <= meta["max_dist"], (
+            f"{dataset}: d_max={d_max} is beyond max_dist={meta['max_dist']}, so those "
+            f"buckets are never even measured")
+
+        # d_min follows the design rule: about half the median diameter
+        median = meta["median_diameter"]
+        assert abs(d_min - median / 2) <= max(2, 0.15 * median), (
+            f"{dataset}: d_min={d_min} is not ~half the median diameter ({median})")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
