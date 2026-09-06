@@ -307,10 +307,51 @@ CHANGELOG (this pass)
   that instead of the LPE-based check, in both __init__ and forward.
   ANY EXISTING signnet/pascalvoc-sp RESULT FROM BEFORE THIS FIX IS
   MISLABELED (it is actually a lappe-equivalent run) AND MUST BE DISCARDED
-  AND RE-RUN, not counted as a real SignNet data point. Other datasets are
-  unaffected: peptides-func/peptides-struct's signnet path goes through
-  _SAN_SignNetLPE / the default gnn_model dispatch respectively, neither of
-  which has this bug (checked directly, not just assumed by analogy).
+  AND RE-RUN, not counted as a real SignNet data point. peptides-func's
+  signnet path goes through _SAN_SignNetLPE (a real, dedicated class,
+  confirmed unaffected) -- CORRECTION to a claim made at the time of the
+  original fix: peptides-struct was NOT actually checked and confirmed
+  unaffected, it was assumed by analogy. A later full audit (see below)
+  found it has the exact same gap, just by omission rather than a broken
+  conditional.
+- FULL AUDIT of every (dataset, PE) combination's actual dispatch, prompted
+  by the signnet/pascalvoc-sp bug above raising the obvious question "what
+  else silently doesn't do what its own docstring says". Two more real
+  findings:
+  (1) _SAN_RWSE -- the class peptides-func's rwse PE depends on -- and its
+      "_variant": "rwse" / dispatch line in _build_san_model were FOUND
+      COMPLETELY MISSING from this file, despite being referenced by name in
+      six separate comments/docstrings elsewhere in the file. Effect:
+      --pe rwse --dataset peptides-func was silently reverted to
+      _build_san_model's default fallback path (upstream SAN_NodeLPE),
+      i.e. the exact original broken RWSE encoding (eigenvector-shaped
+      PE_Transformer + mean-pool-across-steps) this class was built to fix
+      in the first place. RESTORED: class definition (immediately before
+      _GRPEAttentionLayer), its "_variant": "rwse" entry in PE_SPEC["rwse"],
+      and the `if variant == "rwse": return _SAN_RWSE(net_params)` dispatch
+      line in _build_san_model. ANY EXISTING rwse/peptides-func RESULT
+      computed while this class was missing used the broken encoding and
+      should be discarded and re-run, same as the signnet/pascalvoc-sp case.
+      Root cause of the disappearance not determined (likely lost in one of
+      many edits across a long debugging session) -- worth a `grep -c "class
+      _SAN_"` sanity check (expect 5) after any future manual file merge.
+  (2) _SAN_NodeLPE_Regression (peptides-struct) had NO signnet branch AT ALL
+      -- unlike pascalvoc-sp's bug (a broken `if lpe == "signnet"` that never
+      fired), this class never attempted one; only rwse was ever
+      special-cased. Every other PE, including signnet, fell through to the
+      generic eigenvector linear_A/PE_Transformer path -- i.e.
+      signnet/peptides-struct trained identically to lappe/peptides-struct,
+      this entire time. FIXED with the same is_signnet + signnet_phi pattern
+      used in _SAN_NodeClassification's fix. ANY EXISTING signnet/
+      peptides-struct RESULT is mislabeled and should be discarded and
+      re-run.
+  After these two fixes, every one of the 15 (dataset, PE) combinations now
+  has a real, dedicated, verified-present code path -- confirmed via
+  `grep -c "class _SAN_"` (5) and manual trace of _build_san_model's dispatch
+  for all 5 PE_SPEC entries against all 3 datasets' _variant overrides. This
+  was NOT re-verified with an actual training run for either restored path
+  at the time of this audit -- smoke-test rwse/peptides-func and signnet/
+  peptides-struct before trusting results from them.
 """
 
 import gc
@@ -362,6 +403,8 @@ def _build_san_model(net_params):
     lpe = net_params.get("LPE", "none")
     variant = net_params.get("_variant", None)
 
+    if variant == "rwse":
+        return _SAN_RWSE(net_params)
     if variant == "signnet":
         return _SAN_SignNetLPE(net_params)
     if variant == "grpe":
@@ -485,6 +528,104 @@ class _SAN_SignNetLPE(torch.nn.Module):
         else:
             hg = dgl.mean_nodes(g, "h")
 
+        return torch.sigmoid(self.MLP_layer(hg))
+
+
+
+class _SAN_RWSE(torch.nn.Module):
+    """SAN with RWSE (Random Walk Structural Encoding) positional encoding.
+
+    RESTORED: this class and its "_variant": "rwse" / dispatch line were found
+    MISSING from a later copy of this file during a full audit -- every comment
+    and docstring elsewhere in the file still referenced _SAN_RWSE, but the
+    actual class definition and its wiring into PE_SPEC / _build_san_model had
+    been silently dropped at some point, reverting --pe rwse on peptides-func
+    to the exact broken behavior (RWSE features routed through the eigenvector-
+    shaped PE_Transformer + mean-pool-across-steps path) that this class was
+    originally built to fix. If any peptides-func rwse RESULTS exist from a run
+    that used a copy of the file missing this class, they were computed with
+    the broken encoding and should be treated the same as the pascalvoc-sp
+    signnet mislabeling: discard and re-run, don't count as real RWSE data.
+
+    Unlike lappe/signnet (which route through SAN_NodeLPE's PE_Transformer --
+    designed for a permutation-invariant SET of eigenvectors disambiguated by
+    eigenvalue), RWSE features are an ORDERED profile across k random-walk
+    steps (return probability at step 1, 2, ..., k) with no eigenvalue-like
+    channel to pair with them. Reusing the eigenvector pipeline for RWSE means
+    feeding a zero-constant eigenvalue channel and then mean-pooling across
+    the step axis -- discarding exactly the step-order information that makes
+    RWSE informative. This class instead encodes the full k-dim RWSE vector
+    per node with a plain MLP, which sees all k steps jointly and preserves
+    their relative structure instead of averaging them away.
+    """
+    def __init__(self, net_params):
+        super().__init__()
+        from ogb.graphproppred.mol_encoder import AtomEncoder, BondEncoder
+
+        GT_hidden_dim = net_params["GT_hidden_dim"]
+        GT_out_dim = net_params["GT_out_dim"]
+        GT_n_heads = net_params["GT_n_heads"]
+        GT_layers = net_params["GT_layers"]
+        LPE_dim = net_params["LPE_dim"]  # RWSE step count, e.g. 20
+        full_graph = net_params["full_graph"]
+        gamma = net_params["gamma"]
+        dropout = net_params["dropout"]
+        in_feat_dropout = net_params["in_feat_dropout"]
+        layer_norm = net_params["layer_norm"]
+        batch_norm = net_params["batch_norm"]
+        residual = net_params["residual"]
+        n_classes = net_params.get("n_classes", 1)
+
+        from layers.graph_transformer_layer import GraphTransformerLayer
+        from layers.mlp_readout_layer import MLPReadout
+
+        self.readout = net_params["readout"]
+        self.in_feat_dropout = torch.nn.Dropout(in_feat_dropout)
+
+        self.embedding_h = AtomEncoder(emb_dim=GT_hidden_dim - LPE_dim)
+        self.embedding_e = BondEncoder(emb_dim=GT_hidden_dim)
+        self.embedding_e_fake = torch.nn.Embedding(1, GT_hidden_dim)
+
+        # Plain per-node MLP over the full ordered RWSE vector -- sees all
+        # steps jointly, no mean-pool-across-steps information loss.
+        self.rwse_encoder = torch.nn.Sequential(
+            torch.nn.Linear(LPE_dim, LPE_dim),
+            torch.nn.ReLU(),
+            torch.nn.Linear(LPE_dim, LPE_dim),
+        )
+
+        self.layers = torch.nn.ModuleList([
+            GraphTransformerLayer(gamma, GT_hidden_dim, GT_hidden_dim, GT_n_heads,
+                                  full_graph, dropout, layer_norm, batch_norm, residual)
+            for _ in range(GT_layers - 1)
+        ])
+        self.layers.append(
+            GraphTransformerLayer(gamma, GT_hidden_dim, GT_out_dim, GT_n_heads,
+                                  full_graph, dropout, layer_norm, batch_norm, residual)
+        )
+        self.MLP_layer = MLPReadout(GT_out_dim, n_classes)
+
+    def forward(self, g, h, e, rwse, _unused_eigvals=None):
+        import dgl
+        pe = self.rwse_encoder(rwse)  # [n, LPE_dim] -- steps stay joint, no pooling
+        h = torch.cat([self.embedding_h(h), pe], dim=-1)
+        h = self.in_feat_dropout(h)
+
+        if e is not None and e.shape[-1] > 0:
+            e = self.embedding_e(e)
+        else:
+            e = self.embedding_e_fake(torch.zeros(g.num_edges(), dtype=torch.long,
+                                                   device=h.device))
+        for conv in self.layers:
+            h, e = conv(g, h, e)
+
+        g.ndata["h"] = h
+        if self.readout == "sum":
+            hg = dgl.sum_nodes(g, "h")
+        elif self.readout == "max":
+            hg = dgl.max_nodes(g, "h")
+        else:
+            hg = dgl.mean_nodes(g, "h")
         return torch.sigmoid(self.MLP_layer(hg))
 
 
@@ -638,12 +779,32 @@ class _SAN_NodeLPE_Regression(torch.nn.Module):
 
         self.is_rwse = net_params.get("pe") == "rwse"
         self.lpe_dim = net_params["LPE_dim"]
+        # SAME GAP AS THE ONE FOUND AND FIXED IN _SAN_NodeClassification (pascalvoc-sp),
+        # found during a full audit: this class only ever special-cased rwse. Every
+        # other PE -- including signnet -- fell through to the generic eigenvector
+        # linear_A/PE_Transformer path below, meaning signnet/peptides-struct was
+        # NEVER actually sign-invariant; it trained identically to lappe. Unlike the
+        # pascalvoc-sp case (a broken `if lpe == "signnet"` condition that never
+        # fired), this class never had a signnet branch attempted at all -- a gap by
+        # omission, not a broken conditional, but the same practical consequence.
+        # ANY EXISTING signnet/peptides-struct RESULT computed before this fix is
+        # mislabeled and should be discarded, not counted as real SignNet data.
+        self.is_signnet = net_params.get("pe") == "signnet"
         if self.is_rwse:
             LPE_dim = net_params["LPE_dim"]
             # Same fix as _SAN_RWSE: plain per-node MLP over the full ordered
             # RWSE vector, no mean-pool-across-steps.
             self.rwse_encoder = torch.nn.Sequential(
                 torch.nn.Linear(LPE_dim, LPE_dim),
+                torch.nn.ReLU(),
+                torch.nn.Linear(LPE_dim, LPE_dim),
+            )
+        elif self.is_signnet:
+            LPE_dim = net_params["LPE_dim"]
+            # Same construction as _SAN_SignNetLPE / _SAN_NodeClassification's fix:
+            # phi(v) + phi(-v) per eigenvector, sign-invariant.
+            self.signnet_phi = torch.nn.Sequential(
+                torch.nn.Linear(1, LPE_dim),
                 torch.nn.ReLU(),
                 torch.nn.Linear(LPE_dim, LPE_dim),
             )
@@ -674,6 +835,14 @@ class _SAN_NodeLPE_Regression(torch.nn.Module):
             # pe == "rwse" branch, which passes rwse features in the eigvecs slot).
             # EigVals is a zero placeholder and is intentionally unused.
             pe = self.rwse_encoder(EigVecs)  # [n, LPE_dim]
+        elif self.is_signnet and EigVecs is not None:
+            # Sign-invariant: phi(v) + phi(-v) per eigenvector. Previously this PE
+            # had no dedicated branch at all here and fell through to the generic
+            # eigenvector path below -- see __init__'s comment for the full story.
+            n, k = EigVecs.shape
+            v = EigVecs.view(n * k, 1)
+            pe = (self.signnet_phi(v) + self.signnet_phi(-v)).view(n, k, -1)
+            pe = pe.mean(dim=1)  # [n, LPE_dim]
         elif EigVecs is not None and EigVals is not None:
             # LPE
             EigVecs_u = EigVecs.unsqueeze(-1)  # [n, k, 1]
@@ -902,7 +1071,8 @@ PE_SPEC = {
     "lappe":   {"LPE": "node", "LPE_dim": 16, "LPE_n_heads": 4, "LPE_layers": 2},
     # RWSE: fed through SAN's LPE slot with LPE_dim=20 to match RWSE feature width.
     # EigVals set to zeros (RWSE has no eigenvalues). _forward_pass handles the swap.
-    "rwse":    {"LPE": "node", "LPE_dim": 20, "LPE_n_heads": 4, "LPE_layers": 2},
+    "rwse":    {"LPE": "node", "LPE_dim": 20, "LPE_n_heads": 4, "LPE_layers": 2,
+                "_variant": "rwse"},
     # SignNet: uses _SAN_SignNetLPE which applies phi(v)+phi(-v) instead of PE_Transformer
     "signnet": {"LPE": "node", "LPE_dim": 16, "LPE_n_heads": 4, "LPE_layers": 2,
                 "_variant": "signnet"},
