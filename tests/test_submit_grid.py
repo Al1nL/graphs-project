@@ -128,6 +128,40 @@ def test_spanning_datasets_warns_about_the_single_T():
     assert "per dataset" not in out, f"warned on a single-dataset submission:\n{out}"
 
 
+def test_slurm_scripts_find_the_repo_via_slurm_submit_dir():
+    """Regression test for twelve array tasks that died in under six seconds each.
+
+    Both scripts navigated to the repo with `cd "$(dirname "$0")/../.."`, whose comment
+    claimed it worked "regardless of where sbatch was invoked from". The opposite is true:
+    sbatch copies the batch script to the compute node's spool directory and runs the
+    COPY, so $0 is /var/spool/slurmd/job<id>/slurm_script and the cd lands in /var/spool.
+    The first `mkdir -p slurm_logs` there is denied, `set -e` aborts, and the whole array
+    fails with empty stdout and a 67-byte stderr.
+
+    It had never been caught because it only breaks under sbatch -- which is the only way
+    these scripts are meant to be run, but every prior invocation had been srun calling
+    python directly.
+    """
+    for path in (RUN_GRID, os.path.join(os.path.dirname(RUN_GRID), "build_cache.slurm")):
+        with open(path, encoding="utf-8") as f:
+            src = f.read()
+        name = os.path.basename(path)
+
+        assert "SLURM_SUBMIT_DIR" in src, (
+            f"{name} does not use SLURM_SUBMIT_DIR; under sbatch it will cd into the "
+            f"spool directory instead of the repo")
+        # the $0 form may remain ONLY as the fallback inside the parameter expansion
+        for line in src.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("cd ") and "dirname" in stripped:
+                assert "SLURM_SUBMIT_DIR" in stripped, (
+                    f"{name} still navigates by $0 alone: {stripped}")
+
+        assert "not the graphs-project root" in src, (
+            f"{name} does not verify it landed in the repo; without that the next failure "
+            f"is whatever breaks first, several steps from the cause")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

@@ -86,7 +86,26 @@
 #SBATCH --requeue
 
 set -euo pipefail
-cd "$(dirname "$0")/../.."   # repo root, regardless of where sbatch was invoked from
+# Repo root. NOT via $0: sbatch copies this script to the compute node's spool
+# directory and runs the COPY, so $0 is /var/spool/slurmd/job<id>/slurm_script and
+# dirname-based navigation lands in /var/spool -- where the first `mkdir -p slurm_logs`
+# fails with "Permission denied" and `set -e` aborts before any output. Twelve array
+# tasks died in under six seconds each that way, with empty stdout and a 67-byte stderr.
+#
+# SLURM_SUBMIT_DIR is what Slurm sets to the directory sbatch was invoked from, which is
+# the repo root per this script's usage. The $0 form is kept only as the fallback for
+# running the script directly, where it is correct.
+cd "${SLURM_SUBMIT_DIR:-$(dirname "$0")/../..}" || {
+  echo "ERROR: cannot cd to the repo root (SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR:-<unset>})" >&2
+  exit 1
+}
+# Confirm we actually landed there rather than somewhere that merely exists. Without this
+# the next failure is whatever happens to break first, several steps from the cause.
+if [ ! -f "src/pe/compute_pe.py" ]; then
+  echo "ERROR: $PWD is not the graphs-project root (src/pe/compute_pe.py not found)." >&2
+  echo "  Submit from the repo root: cd /path/to/graphs-project && sbatch $0" >&2
+  exit 1
+fi
 mkdir -p slurm_logs
 
 DATASETS=(peptides-func peptides-struct pascalvoc-sp)
