@@ -211,6 +211,42 @@ PE_ENCODER = {
 }
 
 
+def memory_safe_batch(pe: str, batch_size: int):
+    """(physical batch, accumulation steps) for one PE arm, preserving the EFFECTIVE batch.
+
+    All three signnet cells on peptides-func died at epoch 0 with
+
+        torch.cuda.OutOfMemoryError: Tried to allocate 342.00 MiB
+        (GPU 0; 10.57 GiB total capacity; 9.56 GiB already allocated)
+
+    inside GPS's attention softmax, on an 11 GB 2080 Ti. The other three arms trained
+    fine on identical data, so this is SignNet specifically: its phi network runs an
+    8-layer GIN over each of the 16 eigenvector channels separately, holding roughly
+    [K, N, phi_out_dim] activations for the whole batch. The 14% parameter gap
+    (576,138 vs ~504,000) badly understates the ACTIVATION gap, and the attention
+    allocation is simply what happens to ask for memory once SignNet has taken it.
+
+    Halving the physical batch and accumulating twice is the fix that does NOT change
+    what is being compared: cfg.optim.batch_accumulation makes custom_train step the
+    optimizer every 2 iterations (custom_train.py:34), so the gradient each step is
+    computed over the same 128 graphs as the other arms. A plain batch-size cut would
+    have changed the optimization trajectory and confounded the very comparison this
+    study exists to make.
+
+    NOT identical, and this has to be disclosed rather than glossed: BatchNorm statistics
+    are computed over the physical batch, so signnet's normalisation sees 64 graphs where
+    the other arms see 128. That is a second-order difference on top of one already being
+    disclosed for this arm -- it is not parameter-matched either -- and the alternative
+    was no signnet arm at all.
+
+    Applied by ratio rather than to a fixed number so it carries to VOC, whose reference
+    batch is 32 rather than 128.
+    """
+    if pe != "signnet" or batch_size < 2:
+        return batch_size, 1
+    return batch_size // 2, 2
+
+
 def build_graphgym_cfg(run_cfg, graphgps_dir: str):
     """Populate GraphGym's global cfg for one grid cell.
 
@@ -275,6 +311,17 @@ def build_graphgym_cfg(run_cfg, graphgps_dir: str):
     if run_cfg.epochs is not None:
         cfg.optim.max_epoch = run_cfg.epochs
     cfg.train.mode = "custom"          # GraphGPS's own loop; 'standard' needs lightning
+
+    # SignNet needs a smaller physical batch to fit an 11 GB card; accumulation keeps the
+    # effective batch equal to the other arms. See memory_safe_batch for what this does
+    # and does not preserve.
+    physical, accumulation = memory_safe_batch(run_cfg.pe, cfg.train.batch_size)
+    if accumulation > 1:
+        print(f"  batch: {cfg.train.batch_size} -> {physical} x {accumulation} "
+              f"accumulation steps (same effective batch; SignNet's per-eigenvector phi "
+              f"does not fit otherwise)")
+        cfg.train.batch_size = physical
+        cfg.optim.batch_accumulation = accumulation
     cfg.wandb.use = False              # the launcher owns logging
 
     # --- surviving a pre-emptible partition with a wall shorter than a training run ------

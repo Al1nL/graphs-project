@@ -956,6 +956,48 @@ def test_both_gpu_entry_points_check_the_allocation():
                 f"Slurm allocated")
 
 
+def test_memory_workaround_preserves_the_effective_batch():
+    """All three signnet cells OOMed at epoch 0; the fix must not change what is compared.
+
+    SignNet runs an 8-layer GIN over each of 16 eigenvector channels, so it holds far
+    more activation memory than the other arms and died in GPS's attention softmax on an
+    11 GB card. Halving the physical batch alone would have fixed the memory and broken
+    the study: a different batch size is a different optimization trajectory, and the
+    whole point is that the arms differ ONLY in their PE.
+
+    cfg.optim.batch_accumulation makes custom_train step the optimizer every N iterations,
+    so the gradient is still computed over the same 128 graphs.
+    """
+    for base in (128, 32, 256):
+        physical, accumulation = graphgps_backend.memory_safe_batch("signnet", base)
+        assert physical * accumulation == base, (
+            f"effective batch changed: {physical} x {accumulation} != {base}")
+        assert physical < base, "signnet must get a smaller PHYSICAL batch"
+
+
+def test_only_signnet_is_adjusted():
+    """The other three arms trained fine at the reference batch. Touching them would
+    deviate from the published recipe for no reason, and would silently invalidate the
+    nine peptides-func cells already produced at batch 128."""
+    from config import PES
+
+    for pe in PES:
+        physical, accumulation = graphgps_backend.memory_safe_batch(pe, 128)
+        if pe == "signnet":
+            assert (physical, accumulation) == (64, 2)
+        else:
+            assert (physical, accumulation) == (128, 1), (
+                f"{pe} must keep the reference batch untouched, got {physical}x{accumulation}")
+
+
+def test_the_adjustment_is_applied_by_ratio_not_hardcoded():
+    """VOC's reference batch is 32, not 128. A fix pinned to 64 would have left the VOC
+    signnet cells OOMing in exactly the same way, three six-hour cells at a time."""
+    assert graphgps_backend.memory_safe_batch("signnet", 32) == (16, 2)
+    # and a batch too small to split is left alone rather than driven to zero
+    assert graphgps_backend.memory_safe_batch("signnet", 1) == (1, 1)
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
