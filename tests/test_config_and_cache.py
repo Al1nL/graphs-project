@@ -476,6 +476,95 @@ def test_aggregation_excludes_smoke_records_by_field_not_filename():
     assert values == [0.64, 0.65], f"smoke records leaked into aggregation: {values}"
 
 
+def test_dirty_code_ignores_results_and_untracked_files():
+    """A SHA alone is not provenance when the tree can differ from it.
+
+    Concretely: a Slurm array reads src/ at TASK start, not at submission, so a `git pull`
+    mid-array makes later tasks run different code than earlier ones. Auditing that after
+    the fact meant reasoning about commit timestamps against job start times, because
+    nothing in the result files recorded it.
+
+    The exclusion is load-bearing rather than a convenience. results/*.json are TRACKED
+    so the findings exist off the cluster, so every completed cell rewrites one and leaves
+    the tree dirty. A flag that fires on every run carries no information.
+
+    Parsing is tested against canned `git status --porcelain` output, so it does not
+    depend on the state of whatever checkout the suite runs in.
+    """
+    import subprocess as sp
+    import config
+
+    porcelain = (
+        " M src/backends/graphgps_backend.py\n"   # code -- must be reported
+        " M results/gps_rwse_peptides-func_seed0.json\n"   # a finished cell -- must not
+        "?? results/gps_none_peptides-func_seed2.json\n"   # untracked; -uno hides it, but
+                                                           # tolerate it appearing anyway
+        "R  scripts/old.sh -> scripts/new.sh\n"    # rename: the NEW path is what matters
+        " M src/config.py\n"
+    )
+
+    class _Fake:
+        returncode = 0
+        stdout = porcelain
+
+    original = sp.run
+    config.subprocess.run = lambda *a, **k: _Fake()
+    try:
+        dirty = config.repo_dirty_code()
+    finally:
+        config.subprocess.run = original
+
+    assert dirty == ["scripts/new.sh", "src/backends/graphgps_backend.py",
+                     "src/config.py"], dirty
+    assert not any(p.startswith("results/") for p in dirty), (
+        "a rewritten result must not count as changed CODE, or the flag fires on every "
+        "completed cell and means nothing")
+
+
+def test_dirty_code_reports_unknown_rather_than_clean_when_git_fails():
+    """None and [] must not be conflated: "git could not tell us" is not "the code
+    matched the recorded SHA"."""
+    import subprocess as sp
+    import config
+
+    original = sp.run
+    config.subprocess.run = lambda *a, **k: (_ for _ in ()).throw(OSError("no git"))
+    try:
+        assert config.repo_dirty_code() is None
+    finally:
+        config.subprocess.run = original
+
+
+def test_provenance_carries_the_code_identity():
+    from config import RunConfig
+
+    prov = RunConfig("gps", "rwse", "peptides-func", 0).provenance(strict_pins=False)
+    for key in ("code_sha", "code_dirty", "config_hash", "pe_cache_version"):
+        assert key in prov, f"provenance is missing {key}"
+
+
+def test_run_cell_records_provenance_in_every_result():
+    """Read off the source: run_cell needs a backend and this suite runs without one.
+
+    The point is that the record travels with the data. launch.py already put code_sha in
+    its CSV, but the Slurm path calls run_cell directly and bypassed it entirely -- which
+    is exactly the path every grid cell takes.
+    """
+    import ast
+
+    src = os.path.join(os.path.dirname(__file__), "..", "src", "run_experiment.py")
+    with open(src, encoding="utf-8") as f:
+        tree = ast.parse(f.read())
+
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "run_cell")
+    called = {n.func.attr for n in ast.walk(fn)
+              if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
+    assert "provenance" in called, (
+        "run_cell does not call run_cfg.provenance(), so results carry no record of which "
+        "code produced them")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

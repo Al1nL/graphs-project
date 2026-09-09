@@ -120,6 +120,44 @@ def repo_sha() -> Optional[str]:
     return _git_sha(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
+def repo_dirty_code(exclude=("results/",)) -> Optional[list]:
+    """Tracked files differing from HEAD, ignoring `exclude` prefixes. [] means clean.
+
+    A SHA alone is not provenance when the tree can differ from it. This came up
+    concretely: a Slurm array reads src/ at TASK start, not at submission, so a `git pull`
+    while an array is in flight makes later tasks run different code than earlier ones --
+    and nothing in the result files would say so. Auditing that after the fact meant
+    reasoning about commit timestamps against job start times.
+
+    `results/` is excluded, and that exclusion is the point rather than a convenience:
+    those files are tracked so the findings exist off the cluster, so every completed cell
+    rewrites one and leaves the tree dirty. Flagging that would fire on every run and mean
+    nothing. What matters is whether the CODE matched the recorded SHA.
+
+    Untracked files are ignored too -- a new result, a scratch script, a downloaded
+    dataset says nothing about which code ran.
+
+    None (not []) if git cannot answer, so "unknown" is distinguishable from "clean".
+    """
+    path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        out = subprocess.run(
+            ["git", "-C", path, "status", "--porcelain", "--untracked-files=no"],
+            capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    dirty = []
+    for line in out.stdout.splitlines():
+        name = line[3:].strip()                      # strip the XY status columns
+        if " -> " in name:                           # renames: "old -> new"
+            name = name.split(" -> ", 1)[1]
+        if name and not name.startswith(tuple(exclude)):
+            dirty.append(name)
+    return sorted(dirty)
+
+
 def _git_origin(path: str) -> Optional[str]:
     try:
         out = subprocess.run(["git", "-C", path, "remote", "get-url", "origin"],
@@ -329,6 +367,9 @@ class RunConfig:
         return {
             "pe_cache_version": PE_CACHE_VERSION,
             "code_sha": repo_sha(),
+            # The SHA is only meaningful alongside this: [] means the code matched it,
+            # a non-empty list names what did not, None means git could not say.
+            "code_dirty": repo_dirty_code(),
             "upstream": check_pinned(self.backbone, strict=strict_pins),
             "config_hash": self.config_hash(),
         }

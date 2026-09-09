@@ -277,6 +277,13 @@ def run_cell(run_cfg: RunConfig) -> dict:
         "backbone": run_cfg.backbone, "pe": run_cfg.pe, "dataset": run_cfg.dataset,
         "seed": run_cfg.seed, "metric_name": run_cfg.metric_name,
         "config_hash": run_cfg.config_hash(),
+        # Which code produced this. A Slurm array reads src/ at TASK start, not at
+        # submission, so a `git pull` mid-array makes later tasks run different code than
+        # earlier ones -- and without this, nothing in the file would say so. strict_pins
+        # False because a pin mismatch should be RECORDED here, not raised: the cell has
+        # already trained and probed by the time this runs, and refusing to write the
+        # result would destroy the evidence rather than preserve it.
+        "provenance": run_cfg.provenance(strict_pins=False),
         # Stamped on EVERY record, not just smoke ones, so "no field" means "written
         # before this existed" rather than "definitely a real run". A filename suffix
         # alone would not survive a copy or a rename; this travels with the data.
