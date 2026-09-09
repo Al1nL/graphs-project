@@ -125,9 +125,16 @@ def _frobenius_per_source(h_v, x, n_shared_feats, chunk_size, batched_ok):
                 (jac,) = torch.autograd.grad(
                     h_v, x, grad_outputs=chunk, is_grads_batched=True, retain_graph=True
                 )
-            except (RuntimeError, NotImplementedError) as exc:
+            except (RuntimeError, NotImplementedError, TypeError) as exc:
                 # is_grads_batched runs under vmap; an op in this backbone may lack a
-                # batching rule. Fall back to a plain loop -- same number, less speed.
+                # batching rule (RuntimeError/NotImplementedError). TypeError is a
+                # different failure mode entirely: is_grads_batched was added to
+                # torch.autograd.grad in a torch release newer than some backbones are
+                # pinned to (Graphormer's env pins torch==1.9.1, from 2021) -- there the
+                # keyword does not exist at all, and Python raises TypeError before torch's
+                # own code ever runs. Caught here rather than gated on a version check
+                # up front, so this keeps working automatically whichever torch is
+                # actually installed. Fall back to a plain loop -- same number, less speed.
                 warnings.warn(
                     f"is_grads_batched failed ({type(exc).__name__}: {exc}); falling back "
                     "to an unbatched VJP loop for the rest of this run. Results are "

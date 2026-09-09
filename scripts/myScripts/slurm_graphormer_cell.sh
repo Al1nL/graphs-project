@@ -26,13 +26,34 @@
 # --output=graphormer-%x-%j.out below is only what you get submitting this file directly
 # instead of through that wrapper -- it lands in whatever directory you ran sbatch from.)
 #
-# --exclude=s-006: /usr/bin/git is missing on that node entirely (confirmed directly,
-# 2026-08-31 -- `git -C ../Graphormer rev-parse HEAD` fails with "command not found",
-# no git anywhere in the conda env either as a fallback). check_pinned() in config.py
-# treats a failed git call as "pin missing" and launch.py's preflight() then refuses to
-# run at all (strict_pins=True by default here, deliberately -- this is the real grid,
-# not an exploratory smoke test). Six of the first ten seed=0 cells landed on s-006 and
-# died instantly with exactly this error before this fix.
+# --exclude=s-005,s-006: s-005 excluded 2026-09-0X for the reason below (our OWN cells
+# piling up on it). s-006 added 2026-09-08 for the SAME underlying problem but a
+# different cause: `sinfo -N -o "%N %C %O"` showed CPU_LOAD=64.18 on s-006 (vs 5-8 on
+# s-003/s-004/s-005) from OTHER students' jobs sharing it -- studentkillable does not
+# give exclusive CPU access, so a heavy neighbor slows every job on the node, not just
+# ours. Confirmed directly: graphormer_grpe_peptides-func_seed1 and
+# graphormer_none_peptides-struct_seed1 both sat frozen at the SAME checkpoint count
+# (96/200, 53/200) across three separate restarts over three days on s-006/s-002 before
+# being cancelled and resubmitted excluding both.
+#
+# This list is NOT a permanent fix -- contention rotates to whichever node other
+# students' jobs land on. Before a large submission, check `sinfo -N -p studentkillable
+# -o "%N %C %O"` and add whichever node has CPU_LOAD far above the others (single digits
+# is normal; two digits or more means a heavy neighbor).
+#
+# (history: s-002/s-006 were ALSO excluded briefly for an unrelated reason -- a missing
+# `git` binary -- fixed 2026-09-01 in config.py with a pure-Python .git/ fallback, see
+# _dotgit_head_sha/_dotgit_origin_url.)
+#
+# The rest of this comment is the ORIGINAL s-005 finding, unchanged: s-005 turned out to
+# have its own problem: it's where our OWN concurrently-
+# submitted cells kept landing together (confirmed via sinfo: consistently the least
+# idle CPU of the 5 nodes, e.g. 8/40 idle vs. 16-20/40 elsewhere, despite having the same
+# --cpus-per-task=4 request as everywhere else), and each cell's CPU-bound preprocessing
+# bursts far past its requested 4 CPUs (~10-13 cores measured directly) -- several such
+# bursts on one node fight over the same physical cores. Measured directly on
+# lappe/peptides-func seed0: ~55 min/epoch while sharing s-005 with 5 other cells of
+# ours, dropping to ~2 min/epoch once resubmitted excluding s-005.
 
 #SBATCH --job-name=graphormer_cell
 #SBATCH --partition=studentkillable
@@ -40,7 +61,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
 #SBATCH --time=24:00:00
-#SBATCH --exclude=s-002,s-006
+#SBATCH --exclude=s-005,s-006
 #SBATCH --output=graphormer-%x-%j.out
 #SBATCH --error=graphormer-%x-%j.out
 

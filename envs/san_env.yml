@@ -1,0 +1,47 @@
+name: san_env
+
+channels:
+
+  - pytorch
+
+  - dglteam
+
+  - conda-forge
+
+  - defaults
+
+dependencies:
+
+  - python=3.8
+
+  - pytorch=1.9
+
+  - torchvision
+
+  - torchaudio
+
+  - cudatoolkit=11.1
+
+  - dgl-cuda11.1
+
+  - networkx
+
+  - scipy
+
+  - numpy
+
+  - pandas
+
+  - scikit-learn
+
+  - matplotlib
+
+  - pyyaml
+
+  - pip
+
+  - pip:
+
+      - tensorboardX
+
+      - torch-geometric>=2.4

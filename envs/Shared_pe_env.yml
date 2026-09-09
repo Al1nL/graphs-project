@@ -1,0 +1,32 @@
+# envs/shared_pe_env.yml
+#
+# Environment for the SHARED harness code -- src/pe/compute_pe.py, src/sensitivity.py,
+# src/run_experiment.py's orchestration code, and scripts/calibrate_target_nodes.py.
+# This is NOT a per-backbone env (compare graphgps_env.yml / san_env.yml /
+# graphormer_env.yml) -- it exists because those three pin mutually incompatible
+# torch/PyG versions, while the shared code needs a single modern torch/PyG combo.
+#
+# Built directly from the repo's own requirements.txt (do not hand-edit the version
+# bounds below without checking that file first -- it is the source of truth).
+#
+# Do NOT install any backbone's *_env.yml packages into this env, and do not use this
+# env to run backbone training/eval -- see README "Environment setup".
+
+name: shared-pe
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - torch>=2.1,<2.4
+      - torch-geometric>=2.4
+      - numpy>=1.24
+      - scipy>=1.10
+      - networkx>=3.1
+      - pandas>=2.0
+      - pyyaml>=6.0
+      - tqdm>=4.66
+      - matplotlib>=3.7

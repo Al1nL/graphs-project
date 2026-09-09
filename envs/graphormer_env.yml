@@ -1,0 +1,171 @@
+# envs/graphormer_env.yml
+#
+# Originally transcribed from our fork's own install docs at the pinned commit:
+#   ../Graphormer/docs/Installation-Guide.rst  (python version)
+#   ../Graphormer/install.sh                   (everything else)
+# Fork: LioraYacob-Uni/Graphormer, pinned a04573c40705fb174db261bb746a8258d00992f5
+# (see src/config.py FORK_URLS / PINNED_COMMITS). If you re-pin to a newer commit,
+# re-read both files again -- this env is a transcription, not a derivation, and upstream
+# drifts (see README "Version locking").
+#
+# Everything below the original transcription has since been HARDENED against real
+# failures hit getting `conda env create -f envs/graphormer_env.yml` + the post-create
+# steps at the bottom to actually produce a working, importable fairseq/graphormer on this
+# cluster (Ubuntu 24.04, system GCC 13, no GPU-side surprises -- the problems are all
+# host-toolchain/Python-ecosystem drift, not anything specific to one machine). Everything
+# fixed here reproduces from a fresh `conda env create`; nothing was left as a manual,
+# undocumented step run once in someone's terminal.
+#
+# Do NOT install this alongside graphgps_env.yml / san_env.yml in the same env: this pins
+# torch 1.9.1, older than GraphGPS's torch>=2.1 requirement.
+
+name: graphormer
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.9
+  # pip<24.1, not bare `pip`: fairseq's pinned dependency omegaconf<2.1 (every release in
+  # that range, 2.0.1 through 2.0.6) ships a Requires-Dist line ("PyYAML (>=5.1.*)") that
+  # is not valid PEP 440 -- pip's own resolver told us this outright: "Please use pip<24.1
+  # if you need to use this version." pip>=24.1 tightened metadata parsing and refuses to
+  # even resolve past it (ResolutionImpossible, then a hard ParserSyntaxError with the
+  # legacy resolver). This is upstream fairseq/omegaconf's problem, not fixable from here.
+  - pip<24.1
+  # gcc_linux-64/gxx_linux-64=9, not the system compiler: fairseq's `pip install -e .`
+  # below compiles real C++ extensions (libbleu, data_utils_fast) using pybind11 headers
+  # BUNDLED INSIDE torch==1.9.1 (2021-era). Ubuntu 24.04's system g++ is 13.3 -- new enough
+  # that libstdc++ stopped transitively including <cstdint> in headers that used to get it
+  # for free, and that old pybind11.h relies on the transitive include. Result:
+  # "'uint16_t' is not a member of 'std'" deep in pybind11.h, then a cascade of "has no
+  # member 'nargs'" errors from the same broken declaration. CUDA 11.1 (torch's pin) only
+  # officially supports up to ~GCC 9-10 anyway, so this is the right fix on both counts,
+  # not a workaround. Installed into THIS env only -- never touches the system compiler or
+  # any other env.
+  - gcc_linux-64=9
+  - gxx_linux-64=9
+  # cudatoolkit is NOT in upstream install.sh -- upstream gets CUDA 11.1 purely from the
+  # pip wheels' "+cu111" tag and assumes the machine already has a matching system-wide
+  # CUDA 11.1 install for torch-scatter/torch-sparse's compiled extensions to dynamically
+  # link against (they need libcusparse.so.11 etc., which the pip wheels do NOT bundle).
+  # This cluster only has CUDA 12.2 system-wide, so without this, torch_sparse fails with
+  # "OSError: libcusparse.so.11: cannot open shared object file". See the LD_LIBRARY_PATH
+  # note below -- conda-forge's cudatoolkit build ships no activate.d hook, and tcsh
+  # doesn't support conda's activate.d mechanism even when one exists, so activating this
+  # env alone does not put these libs on the loader path.
+  - cudatoolkit=11.1
+  - pip:
+      # torchaudio is installed alongside torch here (not left for fairseq to pull in
+      # later) specifically so fairseq's own install doesn't upgrade torch out from under
+      # us -- that ordering comment is in install.sh itself, not incidental. Pinned to
+      # 0.9.1 (unpinned in upstream install.sh) because that's the version pip's resolver
+      # lands on anyway for torch==1.9.1+cu111 -- pinning it skips a slow backtracking
+      # search through ~20 newer candidates first.
+      # numpy is pinned <1.24, NOT just <2 (which was the original reasoning: torch==1.9.1's
+      # compiled extensions target numpy's pre-2.0 C-API, so an unpinned numpy resolves to
+      # 2.x transitively via pandas/scipy/scikit-learn and torch fails to import with
+      # "_ARRAY_API not found"). <2 alone is not tight enough: fairseq's OWN code
+      # (fairseq/data/indexed_dataset.py) uses the bare alias `np.float`, which numpy
+      # removed OUTRIGHT in 1.24 (deprecated since 1.20, gone since 1.24) --
+      # "AttributeError: module 'numpy' has no attribute 'float'" the first time anything
+      # imports fairseq.data. 1.23.5 is the last release satisfying both constraints.
+      - numpy<1.24
+      # Cython<3, not bare `cython`: needed to compile two DIFFERENT sets of Cython code,
+      # and both need it, but for different reasons.
+      #   (a) fairseq/data/data_utils_fast.pyx -- only the .pyx source ships in the repo,
+      #       no pre-generated .c/.cpp, so `pip install -e .` fails outright with
+      #       "data_utils_fast.cpp: No such file or directory" unless Cython is present to
+      #       generate it first.
+      #   (b) graphormer/data/algos.pyx (Graphormer's OWN shortest-path code, imported via
+      #       `pyximport` at runtime, not at install time) uses old-style Cython syntax
+      #       (bare `long` as a raw C type). Cython 3.x's stricter parser rejects it:
+      #       "algos.pyx:15:43: undeclared name not builtin: long". This is NOT the same
+      #       failure as (a) and only shows up the first time anything actually loads a
+      #       graph (preprocess_item), not at install time -- easy to miss until training
+      #       actually starts. <3 (0.29.x) is old enough to accept both.
+      - cython<3
+      - --find-links=https://download.pytorch.org/whl/cu111/torch_stable.html
+      - torch==1.9.1+cu111
+      - torchaudio==0.9.1
+      - lmdb
+      - --find-links=https://pytorch-geometric.com/whl/torch-1.9.1+cu111.html
+      - torch-scatter==2.0.9
+      - torch-sparse==0.6.12
+      # torch-geometric is >=2.2.0 here, NOT the torch-1.9.1-matched 1.7.2 upstream
+      # install.sh pins (and does NOT use the find-links line above, which only serves
+      # torch-scatter/torch-sparse -- those two DO need to match torch==1.9.1+cu111
+      # exactly, since they are compiled extensions; torch-geometric itself has been
+      # pure-Python-plus-optional-C-extensions since ~2.x and installs as a plain wheel).
+      # 1.7.2 does not have `torch_geometric.datasets.LRGBDataset` at all -- it was added
+      # in 2.2.0 -- and LRGBDataset is how this harness loads Peptides/PascalVOC-SP
+      # everywhere (src/pe/compute_pe.py, src/backends/graphormer_backend.py). Verified by
+      # hand that 2.2.0 does NOT break anything Graphormer's own code needs: it imports
+      # cleanly alongside torch-scatter/torch-sparse==(the 1.9.1-matched versions above),
+      # and graphormer/data/wrapper.py's preprocess_item + the GraphormerPYGDataset
+      # train_set/valid_set/test_set construction path both run correctly against a
+      # PyG-2.2.0-built torch_geometric.data.Data object -- torch_geometric.data.Data
+      # /Dataset's shape did not change in the ways that would matter here.
+      - torch-geometric>=2.2.0
+      - tensorboardX==2.4.1
+      - ogb==1.3.2
+      - rdkit-pypi==2021.9.3
+      - --find-links=https://data.dgl.ai/wheels/repo.html
+      - dgl==0.7.2
+      # protobuf is pinned <4 (unpinned upstream) because tensorboardX==2.4.1 ships _pb2.py
+      # files generated by an old protoc; protobuf's 4.x/upb rewrite made those raise
+      # "Descriptors cannot be created directly" on import. 3.20.3 is the last 3.x release.
+      - protobuf<4
+      # NOT backbone-specific -- generic tooling scripts/calibrate_target_nodes.py and
+      # scripts/aggregate_results.py need in whichever process trains/probes Graphormer,
+      # since that has to be this env, not shared-pe_env (see README "Environment setup").
+      - matplotlib
+      - pandas
+
+# --------------------------------------------------------------------------------------
+# fairseq is a git SUBMODULE of the Graphormer repo (path "fairseq", pointing at
+# pytorch/fairseq), not a pip package -- it cannot be listed above. `setup_upstream.sh`
+# clones with a plain `git clone`, which does NOT fetch submodules, so a fresh clone's
+# ../Graphormer/fairseq/ is an EMPTY directory pinned at 98ebe4f1 with nothing checked out.
+# Non-obvious trap: `import fairseq` still "succeeds" against that empty directory (Python
+# treats it as an implicit namespace package), so the submodule being uninitialized does
+# NOT fail loudly at import time -- only a real usage like `import fairseq.tasks` does,
+# and by then it looks like an unrelated bug deep in training. Before training, from the
+# Graphormer checkout:
+#
+#   conda env create -f envs/graphormer_env.yml
+#   conda activate graphormer
+#   # cudatoolkit's libs land in $CONDA_PREFIX/lib but nothing puts that dir on the
+#   # loader path (see the cudatoolkit comment above) -- without this, torch_sparse /
+#   # torch_scatter fail with "libcusparse.so.11: cannot open shared object file".
+#   # tcsh errors with "LD_LIBRARY_PATH: Undefined variable" if you reference
+#   # ${LD_LIBRARY_PATH} to append to it before it's ever been set in that shell (unlike
+#   # bash, an unset var isn't silently empty) -- $?LD_LIBRARY_PATH guards for that.
+#   if ($?LD_LIBRARY_PATH) then                                        # tcsh
+#       setenv LD_LIBRARY_PATH ${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH}
+#   else
+#       setenv LD_LIBRARY_PATH ${CONDA_PREFIX}/lib
+#   endif
+#   export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH          # bash/zsh
+#   cd ../Graphormer
+#   git submodule update --init --recursive   # fills in fairseq/ at its pinned commit
+#   cd fairseq
+#   # Explicit CC/CXX: without this, `pip install` falls back to the SYSTEM compiler
+#   # (GCC 13 here), not the GCC 9 this env just installed -- conda activating an env does
+#   # not, by itself, change which `cc`/`gcc` a build tool picks up unless something points
+#   # at it explicitly. The binary names below are what gcc_linux-64/gxx_linux-64 install
+#   # as, inside $CONDA_PREFIX/bin.
+#   CC=$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-gcc \
+#   CXX=$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-g++ \
+#   pip install --no-build-isolation -e .
+#
+# Verify before trusting the env: `python -c "import fairseq.tasks; import sys;
+# sys.path.insert(0, '../..'); import graphormer"` from inside fairseq/ -- `import fairseq`
+# alone is NOT sufficient (see the namespace-package trap above), and this must be run
+# BEFORE anything puts the Graphormer repo root on sys.path (src/backends/
+# graphormer_backend.py's ensure_graphormer_importable does this in the right order for
+# exactly this reason -- putting the Graphormer repo root on sys.path before fairseq is
+# imported lets `Graphormer/fairseq` (the submodule ROOT, not the `fairseq/fairseq`
+# package inside it, and itself missing an __init__.py) shadow the real installed fairseq
+# as an empty namespace package -- same failure mode as the uninitialized-submodule trap
+# above, self-inflicted by import order instead).

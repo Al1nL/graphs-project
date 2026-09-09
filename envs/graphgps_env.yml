@@ -1,0 +1,35 @@
+# Transcribed from ../GraphGPS/README.md ("Python environment setup with Conda"), the
+# upstream install recipe for the commit pinned in config.PINNED_COMMITS["gps"]. Kept in
+# its own env (see the "Do NOT try to share one env across all three" note in the
+# project's top-level README) because GraphGPS wants PyG>=2.0 + a much newer torch/CUDA
+# than SAN or Graphormer pin.
+name: graphgps
+channels:
+  - pytorch
+  - nvidia
+  - pyg
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pytorch=1.13
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=11.7
+  - pyg=2.2
+  # RDKit is required for OGB-LSC PCQM4Mv2 and datasets derived from it (upstream README's
+  # own comment). openbabel/fsspec are installed alongside it upstream, same conda command.
+  - openbabel
+  - fsspec
+  - rdkit
+  - pip
+  - pip:
+      - --find-links=https://data.pyg.org/whl/torch-1.13.0+cu117.html
+      - pyg-lib
+      - pytorch-lightning
+      - yacs
+      - torchmetrics
+      - performer-pytorch
+      - tensorboardX
+      - ogb
+      - wandb

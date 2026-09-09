@@ -61,6 +61,18 @@ for backbone in wanted:
                               capture_output=True, text=True).stdout.strip()
         print(f"[{backbone}] NOT PINNED. Record this in config.PINNED_COMMITS before "
               f"producing any results:\n    \"{backbone}\": \"{head}\",")
+
+    # A plain `git clone` above does not fetch submodules -- Graphormer vendors fairseq
+    # this way (path "fairseq"), so without this its checkout silently sits at an empty
+    # directory that LOOKS pinned (git submodule status still reports a SHA) but has no
+    # code in it. Idempotent and a no-op for backbones with no submodules.
+    submodules = subprocess.run(["git", "-C", path, "config", "--file", ".gitmodules",
+                                 "--get-regexp", "path"], capture_output=True,
+                                text=True).stdout.strip()
+    if submodules:
+        print(f"[{backbone}] initializing submodules")
+        subprocess.run(["git", "-C", path, "submodule", "update", "--init",
+                        "--recursive"], check=True)
 PYEOF
 
 echo

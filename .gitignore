@@ -5,9 +5,17 @@ __pycache__/
 cache/
 raw_data/
 
-# Run outputs. results/*.json are produced by run_experiment.py; keep the dir, not the runs.
-results/
+# Run outputs. Checkpoints (results/raw/) and per-job SLURM logs (results/slurm_logs/)
+# are large and reproducible from a rerun -- excluded via the blanket results/* below.
+# The actual small deliverables -- the per-cell result JSONs and the calibration sweep
+# outputs -- are un-ignored explicitly so they can be committed and shared with
+# teammates without needing `git add -f`. job_ids.csv and the per-cell runs_*.csv (pure
+# bookkeeping, duplicate what the JSONs already say) stay excluded on purpose.
+results/*
 !results/.gitkeep
+!results/graphormer_*.json
+!results/calibration_*.csv
+!results/calibration_*.png
 
 .venv/
 venv/

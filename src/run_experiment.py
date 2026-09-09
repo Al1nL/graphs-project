@@ -26,11 +26,16 @@ import argparse
 import json
 import os
 import sys
+import time
+
+import torch
 
 sys.path.insert(0, os.path.dirname(__file__))
 from adapters.graphgps_adapter import build_posenc_config
 from adapters.san_adapter import build_san_config
 from adapters.graphormer_adapter import build_graphormer_config
+import sensitivity
+from dataset_meta import abs_rho_window, REL_BINS, REL_RHO_WINDOW
 
 DATASETS = ["peptides-func", "peptides-struct", "pascalvoc-sp"]
 PES = ["none", "lappe", "rwse", "signnet", "grpe"]
@@ -70,11 +75,18 @@ def san_train(config, dataset, seed):
     )
 
 
-def graphormer_train(config, dataset, seed):
-    raise NotImplementedError(
-        "Point this at Graphormer's graphormer/train.py (fairseq-cli based) once "
-        "Graphormer is cloned locally."
-    )
+def graphormer_train(run_cfg, dataset=None, seed=None):
+    """Train one grid cell with Graphormer. Delegates to backends/graphormer_backend.py.
+
+    Imported lazily: Graphormer needs its own environment (fairseq, torch==1.9.1+cu111,
+    PyG==2.2.0 -- see envs/graphormer_env.yml), so importing at module scope would break
+    the launcher's --dry-run and the whole test suite on any machine that has not set that
+    env up. Mirrors graphgps_train's signature exactly: launch.py's run_one() calls
+    TRAIN_FN[cfg.backbone](cfg, cfg.dataset, cfg.seed), so dataset/seed are accepted but
+    unused -- both already live inside run_cfg.
+    """
+    from backends.graphormer_backend import graphormer_train as _train
+    return _train(run_cfg)
 
 
 TRAIN_FN = {"gps": graphgps_train, "san": san_train, "graphormer": graphormer_train}
@@ -109,12 +121,156 @@ def make_model_fn(trained_model, backbone: str, data, pe_record):
     if backbone == "gps":
         from backends.graphgps_backend import make_gps_model_fn
         return make_gps_model_fn(trained_model, data)
+    if backbone == "graphormer":
+        # CAVEAT not present for "gps": `data` here must already be a Graphormer-
+        # preprocessed item (whatever _CachedPEGraphormerDataset.__getitem__ returns --
+        # has .x, .spatial_pos, .attn_edge_type, .extra_pe if applicable), NOT a raw PyG
+        # graph. make_gps_model_fn's `data` is closer to raw because GraphGPS's own
+        # encoder does that preprocessing internally; Graphormer's cached-PE substitution
+        # happens at the DATASET level (see graphormer_backend.py's module docstring), so
+        # whatever samples test graphs to call make_model_fn on must pull them from that
+        # backend's `test_dataset` (graphormer_train's return value), not from a raw
+        # LRGBDataset split directly -- see sample_test_graphs below, which does exactly
+        # that dispatch.
+        from backends.graphormer_backend import make_graphormer_model_fn
+        return make_graphormer_model_fn(trained_model, data)
     raise NotImplementedError(
-        f"make_model_fn is implemented for 'gps' only; '{backbone}' still needs its repo "
-        "cloned and forked. For SAN this is the output of the final SAN layer before "
-        "readout; for Graphormer, the last encoder layer's token states with the "
-        "virtual/graph token dropped. Both must satisfy the two constraints above."
+        f"make_model_fn is implemented for 'gps' and 'graphormer' only; '{backbone}' "
+        "still needs its repo cloned and forked. For SAN this is the output of the final "
+        "SAN layer before readout. Must satisfy the two constraints above."
     )
+
+
+def sample_test_graphs(train_result: dict, backbone: str, n_graphs: int, seed: int = 0):
+    """Pull up to `n_graphs` individual PyG-Data-like objects from a trained cell's TEST
+    split, in whatever shape `make_model_fn` expects for that backbone (see its docstring
+    for why that shape differs between backbones).
+
+    Returns (graph_ids, graphs): `graph_ids` are the TEST-SPLIT indices (stable across
+    seeds -- see `main()`'s result-dict schema for why that stability matters for the
+    bootstrap), parallel to `graphs`.
+    """
+    if backbone == "gps":
+        # GraphGym's create_loader() convention (graphgps_backend.graphgps_train's
+        # "loaders"): [train_loader, val_loader, test_loader]. Each loader wraps a PyG
+        # Dataset directly accessible via .dataset, the same indexing style as
+        # graphormer's test_dataset below -- NOT validated against a real GraphGPS run by
+        # this author (no GraphGPS env here); flagged for the GraphGPS owner to confirm
+        # index 2 is really the test split before trusting graph_id stability across seeds.
+        test_dataset = train_result["loaders"][2].dataset
+    elif backbone == "graphormer":
+        test_dataset = train_result["test_dataset"]
+    else:
+        raise NotImplementedError(f"sample_test_graphs: backbone={backbone!r} not wired")
+
+    n = len(test_dataset)
+    rng = torch.Generator().manual_seed(seed)
+    graph_ids = torch.randperm(n, generator=rng)[: min(n_graphs, n)].tolist()
+    return graph_ids, [test_dataset[i] for i in graph_ids]
+
+
+def run_probe(train_result: dict, backbone: str, run_cfg, n_graphs: int = 10):
+    """Run the shared sensitivity probe on a sample of the trained cell's test graphs, at
+    the ALREADY-CALIBRATED `run_cfg.num_target_nodes` (no sweep -- that is
+    scripts/calibrate_target_nodes.py's job, run once per (backbone, dataset) beforehand).
+
+    This is what launch.py's run_one() was missing entirely: it trained a real model but
+    never called this, so `rho`/`n_shared_feats` came back empty even on a successful
+    training run. Mirrors calibrate_target_nodes.py's `load_real` sampling logic, minus
+    the T-sweep.
+
+    Returns (pooled_curve, per_graph_records, n_shared_feats):
+      pooled_curve       average_curves(...) over the sampled graphs -- what `long_range_
+                         fraction` needs for the absolute-d rho.
+      per_graph_records  one {"curve", "diameter", "num_nodes", "graph_id"} dict per
+                         sampled graph -- exactly the schema main()'s result JSON
+                         documents as required (bootstrap clustering, the relative-d axis,
+                         re-deriving rho at analysis time for a different window). This
+                         CANNOT be reconstructed after the fact, so callers should persist
+                         it, not just the pooled point estimate.
+      n_shared_feats     from the wrapped model_fn's meta; identical across PE variants by
+                         construction (see make_model_fn's docstring) -- callers should
+                         still run `sensitivity.assert_shared_width` across a dataset's
+                         five PE arms once before trusting cross-PE comparisons.
+    """
+    if run_cfg.num_target_nodes is None:
+        raise ValueError(
+            "run_cfg.num_target_nodes is required to run the probe -- calibrate it first "
+            "with scripts/calibrate_target_nodes.py and pass the value it reports."
+        )
+    graph_ids, graphs_raw = sample_test_graphs(train_result, backbone, n_graphs, run_cfg.seed)
+    model = train_result["model"]
+
+    per_graph = []
+    n_shared_feats = None
+    for graph_id, raw in zip(graph_ids, graphs_raw):
+        model_fn, probe_data, meta = make_model_fn(model, backbone, raw, pe_record=None)
+        n_shared_feats = meta["n_shared_feats"]
+        curve = sensitivity.compute_sensitivity_curve(
+            model_fn, probe_data, n_shared_feats=n_shared_feats,
+            max_dist=run_cfg.resolved_max_dist(), num_target_nodes=run_cfg.num_target_nodes,
+        )
+        diameter = sensitivity.graph_diameter(probe_data.edge_index, probe_data.num_nodes)
+        per_graph.append({
+            "curve": curve, "diameter": diameter,
+            "num_nodes": probe_data.num_nodes, "graph_id": graph_id,
+        })
+
+    pooled = sensitivity.average_curves([r["curve"] for r in per_graph])
+    return pooled, per_graph, n_shared_feats
+
+
+def run_cell(run_cfg, n_graphs: int = 10) -> dict:
+    """Train one grid cell AND run the shared probe on it, returning the full result-JSON
+    schema (see the field-by-field rationale in this function's body -- graph_id/diameter
+    per graph, rho on both axes, ...).
+
+    Shared by run_experiment.py's own CLI (`main`, below) and scripts/launch.py's
+    `run_one`, so the two entry points for "run one cell" cannot drift into writing two
+    different result shapes -- which is exactly what happened before this fix: `main()`
+    always wrote an empty placeholder, and launch.py's run_one() trained for real but
+    never called the probe at all, so neither one actually produced this schema.
+
+    Does NOT catch exceptions -- callers decide how to handle a NotImplementedError (a
+    stub backbone/dataset combination, e.g. Graphormer+pascalvoc-sp) vs. any other failure.
+    """
+    t0 = time.time()
+    train_result = TRAIN_FN[run_cfg.backbone](run_cfg)
+    result = {
+        "backbone": run_cfg.backbone, "pe": run_cfg.pe, "dataset": run_cfg.dataset,
+        "seed": run_cfg.seed, "metric_name": run_cfg.metric_name,
+        "metric_value": train_result["metric_value"],
+        "num_params": train_result["num_params"],
+        "num_target_nodes": run_cfg.num_target_nodes,
+        "train_time_seconds": None,  # filled below, after the probe -- see the note there
+    }
+
+    # `graph_id` (the TEST-SPLIT index) and `diameter` are recorded per graph -- see
+    # run_probe's docstring for why both are load-bearing for the bootstrap and the
+    # relative-distance axis, and CANNOT be reconstructed from the pooled curve alone
+    # after the fact (record them on the FIRST run, or re-train to recover them).
+    pooled, per_graph, n_shared = run_probe(train_result, run_cfg.backbone, run_cfg, n_graphs)
+    result["n_shared_feats"] = n_shared
+    result["sensitivity_curve"] = pooled
+    result["sensitivity_curves_per_graph"] = per_graph
+
+    d_min, d_max = abs_rho_window(run_cfg.dataset)
+    result["rho"] = sensitivity.long_range_fraction(pooled, d_min, d_max)
+
+    rel_curves = [
+        sensitivity.to_relative_curve(r["curve"], r["diameter"], n_bins=REL_BINS)
+        for r in per_graph if r["diameter"] > 0
+    ]
+    result["rho_rel"] = (
+        sensitivity.long_range_fraction(sensitivity.average_curves(rel_curves), *REL_RHO_WINDOW)
+        if rel_curves else None
+    )
+    # train_time_seconds intentionally covers training AND the probe: whoever reads this
+    # field (e.g. launch.py's CSV) wants "how long did this cell tie up the GPU", not just
+    # the training fraction of it.
+    result["train_time_seconds"] = round(time.time() - t0, 2)
+    result["status"] = "ok"
+    return result
 
 
 def main():
@@ -125,7 +281,13 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--cache-dir", default=None, help="defaults to cache/<dataset>/")
     parser.add_argument("--results-dir", default="results")
+    parser.add_argument("--num-target-nodes", type=int, required=True,
+                        help="from scripts/calibrate_target_nodes.py; no default by design")
+    parser.add_argument("--n-graphs", type=int, default=10,
+                        help="test graphs to sample for the sensitivity probe")
     args = parser.parse_args()
+
+    from config import RunConfig  # noqa: E402 -- local import, config.py already sys.path'd
 
     cache_dir = args.cache_dir or f"cache/{args.dataset}"
     config = build_config(args.backbone, args.pe, args.dataset, cache_dir)
@@ -134,55 +296,27 @@ def main():
           f"seed={args.seed}")
     print(f"[run_experiment] resolved config: {json.dumps(config, indent=2, default=str)}")
 
-    train_fn = TRAIN_FN[args.backbone]
-    # metrics, sensitivity_curve = train_fn(config, args.dataset, args.seed)
-    # -- disabled until a real backbone repo is wired in; see stub NotImplementedError above
+    run_cfg = RunConfig(backbone=args.backbone, pe=args.pe, dataset=args.dataset,
+                        seed=args.seed, cache_dir=args.cache_dir,
+                        results_dir=args.results_dir,
+                        num_target_nodes=args.num_target_nodes)
 
     os.makedirs(args.results_dir, exist_ok=True)
-    out_path = os.path.join(
-        args.results_dir,
-        f"{args.backbone}_{args.pe}_{args.dataset}_seed{args.seed}.json",
-    )
-    result = {
-        "backbone": args.backbone,
-        "pe": args.pe,
-        "dataset": args.dataset,
-        "seed": args.seed,
-        "metric_name": TASK_METRIC[args.dataset],
-        "metric_value": None,           # <-- FILL AFTER RUN: primary task metric (AP/MAE/F1)
-        "num_params": None,             # <-- FILL AFTER RUN: trainable parameter count
-        "train_time_seconds": None,     # <-- FILL AFTER RUN
-        "peak_gpu_mem_mb": None,        # <-- FILL AFTER RUN
-        "n_shared_feats": None,         # <-- FILL AFTER RUN: input width the Jacobian was
-                                        #     taken over; must match across all 5 PE variants
-        "sensitivity_curve": {},        # <-- FILL AFTER RUN: {hop_distance: {"mean":, "count":}}
-                                        #     pooled over sampled graphs via average_curves
-        "sensitivity_curves_per_graph": [],
-        # ^ FILL AFTER RUN: one entry per sampled test graph, shaped
-        #     {"curve": {d: {"mean":, "count":}}, "diameter": int, "num_nodes": int,
-        #      "graph_id": int}
-        #   `graph_id` is the TEST-SPLIT INDEX and must be stable across seeds: the same
-        #   graphs are probed under every training run, so graph 17 at seeds 0/1/2 is ONE
-        #   molecule measured three times, not three independent observations. The
-        #   bootstrap clusters on it; without it the standard error is understated by up
-        #   to sqrt(n_seeds). It CANNOT be added after the fact -- record it from the
-        #   first run or re-train to recover it.
-        #   `diameter` (sensitivity.graph_diameter) is REQUIRED for the relative-distance
-        #   axis: it rebins each graph onto d/diam(G) so rho is comparable ACROSS datasets
-        #   whose diameters differ ~2x, and so far buckets are not dominated by whichever
-        #   graphs happen to be large enough to have them. Without it only absolute rho
-        #   can be computed, and that is within-dataset only.
-        #   REQUIRED for error bars: rho's confidence interval is a bootstrap that
-        #   resamples whole GRAPHS, because node pairs within a graph are not independent.
-        #   Without this list, aggregate_results.py can only report rho as a point estimate
-        #   with no way to distinguish a real gap from sampling noise. It also lets the rho
-        #   window (d_min, d_max) be varied at analysis time without re-running the probe --
-        #   which matters, since that window is still provisional (see docs/analysis-plan.md).
-        "status": "NOT_RUN — training stub not wired to a cloned backbone repo yet",
-    }
+    out_path = run_cfg.result_path
+    try:
+        result = run_cell(run_cfg, n_graphs=args.n_graphs)
+    except NotImplementedError as exc:
+        # the training entry point (or the probe wiring) is a stub for this backbone --
+        # say so rather than writing a placeholder that looks like a real result
+        result = {
+            "backbone": args.backbone, "pe": args.pe, "dataset": args.dataset,
+            "seed": args.seed, "metric_name": TASK_METRIC[args.dataset],
+            "metric_value": None, "status": f"not_implemented: {exc}",
+        }
+
     with open(out_path, "w") as f:
         json.dump(result, f, indent=2)
-    print(f"[run_experiment] wrote placeholder result to {out_path}")
+    print(f"[run_experiment] wrote {result['status']} result to {out_path}")
 
 
 if __name__ == "__main__":

@@ -108,14 +108,59 @@ def _demo_factory(seed=0):
     return factory
 
 
-def load_real(backbone, pe, dataset, checkpoint, n_graphs):
-    raise NotImplementedError(
-        "Wire this to your trained backbone once its repo is cloned. It must return "
-        "(model_fn_factory, graphs, n_shared_feats), where model_fn_factory(data) yields "
-        "the `model_fn(x) -> [n, p]` callable described in run_experiment.make_model_fn "
-        "and `graphs` is a sample of TEST graphs. Until then use --demo to exercise the "
-        "calibration pipeline itself."
-    )
+def load_real(backbone, pe, dataset, checkpoint, n_graphs, epochs=None, max_train_graphs=None):
+    """Train (or load) a real model, sample `n_graphs` TEST graphs, and return
+    (model_fn_factory, graphs, n_shared_feats) -- see `sweep_target_nodes`'s docstring in
+    src/calibration.py for the exact contract `model_fn_factory` must satisfy.
+
+    Wired for backbone="graphormer" only; "gps"/"san" still need the equivalent (see
+    src/backends/graphormer_backend.py for the pattern to follow -- train via
+    <backbone>_train, sample test items, wrap each with make_<backbone>_model_fn).
+    """
+    if backbone != "graphormer":
+        raise NotImplementedError(
+            f"load_real is wired for backbone='graphormer' only; '{backbone}' still needs "
+            "the same treatment. See src/backends/graphormer_backend.py for the pattern to "
+            "mirror (train via <backbone>_train, sample n_graphs test items, wrap each with "
+            "make_<backbone>_model_fn)."
+        )
+    if checkpoint is not None:
+        raise NotImplementedError(
+            "loading a pre-trained checkpoint directly (skipping training) is not wired -- "
+            "graphormer_train always trains from scratch. Omit --checkpoint to train, or "
+            "wire checkpoint-only loading into backends/graphormer_backend.py first."
+        )
+
+    from config import RunConfig
+    from backends.graphormer_backend import graphormer_train, make_graphormer_model_fn
+
+    run_cfg = RunConfig(backbone="graphormer", pe=pe, dataset=dataset, seed=0, epochs=epochs)
+    print(f"[load_real] training graphormer/{pe}/{dataset} for real -- this runs Graphormer's "
+          f"own fairseq training loop and can take a while.")
+    result = graphormer_train(run_cfg, max_graphs_per_split=max_train_graphs)
+    model, test_dataset = result["model"], result["test_dataset"]
+    print(f"[load_real] trained: {result['num_params']:,} params, "
+          f"{result['metric_name']}={result['metric_value']}")
+
+    n = len(test_dataset)
+    if n == 0:
+        raise RuntimeError(f"test split of {dataset} is empty")
+    rng = torch.Generator().manual_seed(0)
+    idx = torch.randperm(n, generator=rng)[: min(n_graphs, n)].tolist()
+
+    # make_graphormer_model_fn re-runs GraphNodeFeature per call (cheap, but not free), so
+    # each sampled graph's (model_fn, probe_data) pair is built ONCE here and looked up by
+    # identity -- sweep_target_nodes calls model_fn_factory(data) once per T in the ladder,
+    # for the SAME `data` objects returned in `graphs` below.
+    model_fn_by_id, graphs, n_shared = {}, [], None
+    for i in idx:
+        item = test_dataset[i]
+        model_fn, probe_data, meta = make_graphormer_model_fn(model, item)
+        model_fn_by_id[id(probe_data)] = model_fn
+        graphs.append(probe_data)
+        n_shared = meta["n_shared_feats"]  # identical across items -- see probe_widths()
+
+    return (lambda data: model_fn_by_id[id(data)]), graphs, n_shared
 
 
 def plot(rows, rec, out_png, d_min, d_max, title_extra=""):
@@ -155,6 +200,14 @@ def main():
                     help="run on synthetic graphs with an untrained toy backbone")
     ap.add_argument("--backbone"), ap.add_argument("--pe"), ap.add_argument("--dataset")
     ap.add_argument("--checkpoint")
+    ap.add_argument("--epochs", type=int, default=None,
+                    help="override the reference config's max_epoch (graphormer only) -- "
+                         "useful to bound how long a background run takes")
+    ap.add_argument("--max-train-graphs", type=int, default=None,
+                    help="truncate each split to its first N graphs (graphormer only) -- "
+                         "a smoke-test knob to validate the whole train/eval/probe chain "
+                         "in minutes; the T it recommends is NOT meaningful, only --demo's "
+                         "warning applies here too")
     ap.add_argument("--n-graphs", type=int, default=10)
     ap.add_argument("--ladder", type=int, nargs="+", default=list(DEFAULT_LADDER))
     ap.add_argument("--max-dist", type=int, default=20)
@@ -184,7 +237,8 @@ def main():
         if missing:
             ap.error(f"--{', --'.join(missing)} required (or pass --demo)")
         factory, graphs, n_shared = load_real(
-            args.backbone, args.pe, args.dataset, args.checkpoint, args.n_graphs
+            args.backbone, args.pe, args.dataset, args.checkpoint, args.n_graphs,
+            epochs=args.epochs, max_train_graphs=args.max_train_graphs,
         )
         tag = f"{args.backbone}_{args.pe}_{args.dataset}"
 

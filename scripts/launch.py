@@ -135,7 +135,7 @@ def append_csv(path, row):
 
 
 def run_one(cfg, wandb_run=None, strict_pins=True):
-    from run_experiment import build_config
+    from run_experiment import build_config, run_cell
 
     seed_everything(cfg.seed, cfg.deterministic)
     prov = cfg.provenance(strict_pins=strict_pins)
@@ -148,10 +148,19 @@ def run_one(cfg, wandb_run=None, strict_pins=True):
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
     t0 = time.time()
+    result = None
     try:
         build_config(cfg.backbone, cfg.pe, cfg.dataset, cfg.resolved_cache_dir)
-        from run_experiment import TRAIN_FN
-        TRAIN_FN[cfg.backbone](cfg, cfg.dataset, cfg.seed)
+        # run_cell trains AND runs the shared sensitivity probe, returning the full
+        # result-JSON schema (rho, rho_rel, metric_value, per-graph curves, ...) -- NOT
+        # just training. Before this fix, run_one() only ever called TRAIN_FN directly and
+        # discarded its return value entirely: a cell could train for real (real GPU
+        # hours) and still leave rho/metric_value empty in both the CSV and (since nothing
+        # wrote one) the per-cell JSON that --resume's already_done() depends on.
+        result = run_cell(cfg, n_graphs=10)
+        row.update({k: result[k] for k in
+                    ("metric_value", "num_params", "rho", "rho_rel", "n_shared_feats")
+                    if k in result})
         row["status"] = "ok"
     except NotImplementedError as exc:
         # the training entry points are stubs until the backbone repos are cloned; say so
@@ -163,6 +172,15 @@ def run_one(cfg, wandb_run=None, strict_pins=True):
         row["error"] = traceback.format_exc(limit=3).replace("\n", " | ")[:500]
     row["train_time_seconds"] = round(time.time() - t0, 2)
     row["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+
+    # Write the SAME per-cell JSON run_experiment.py's own CLI would write, at the path
+    # already_done() reads for --resume -- without this, --resume can never actually skip
+    # a completed cell, because no file exists there to check.
+    if result is not None:
+        os.makedirs(os.path.dirname(cfg.result_path) or ".", exist_ok=True)
+        with open(cfg.result_path, "w") as f:
+            json.dump(result, f, indent=2)
+
     if wandb_run is not None:
         wandb_run.log({k: v for k, v in row.items() if isinstance(v, (int, float))})
     return row

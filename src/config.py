@@ -64,7 +64,7 @@ PINNED_COMMITS = {
     # pinned 2026-07-29, level with rampasek/GraphGPS main at the time of forking
     "gps": "28015707cbab7f8ad72bed0ee872d068ea59c94b",
     "san": None,          # DevinKreuzer/SAN -- not forked yet
-    "graphormer": None,   # microsoft/Graphormer -- not forked yet
+    "graphormer": "a04573c40705fb174db261bb746a8258d00992f5",   # microsoft/Graphormer -- not forked yet
 }
 
 # We clone OUR FORKS, not upstream directly. A commit SHA is only a reference: it assumes
@@ -79,7 +79,7 @@ PINNED_COMMITS = {
 FORK_URLS = {
     "gps": "https://github.com/pazflashner/GraphGPS.git",
     "san": None,
-    "graphormer": None,
+    "graphormer": "https://github.com/LioraYacob-Uni/Graphormer.git",
 }
 
 UPSTREAM_URLS = {   # the `upstream` remote inside each fork, for syncing
@@ -95,13 +95,66 @@ UPSTREAM_PATHS = {
 }
 
 
+def _dotgit_head_sha(path: str) -> Optional[str]:
+    """Resolve HEAD by reading .git/ directly, no `git` binary required.
+
+    This cluster's compute nodes have no `git` on PATH at all (confirmed directly: a
+    SLURM job's `which git` finds nothing, even though /usr/bin is on PATH -- the login
+    node simply has a package the compute nodes don't) -- every strict-pin preflight
+    check was failing instantly inside every submitted job with "repo not found",
+    even though the checkout was perfectly correct, because `_git_sha` had no working
+    fallback. HEAD is either `ref: refs/heads/<branch>` (resolved via the loose ref file,
+    falling back to packed-refs if the branch was packed) or a bare SHA (detached HEAD).
+    """
+    try:
+        with open(os.path.join(path, ".git", "HEAD")) as f:
+            head = f.read().strip()
+    except OSError:
+        return None
+    if not head.startswith("ref:"):
+        return head or None
+    ref = head.split(":", 1)[1].strip()
+    try:
+        with open(os.path.join(path, ".git", ref)) as f:
+            return f.read().strip() or None
+    except OSError:
+        pass
+    try:
+        with open(os.path.join(path, ".git", "packed-refs")) as f:
+            for line in f:
+                if line.strip().endswith(" " + ref):
+                    return line.split()[0]
+    except OSError:
+        pass
+    return None
+
+
+def _dotgit_origin_url(path: str) -> Optional[str]:
+    """Read the origin remote URL from .git/config directly -- see _dotgit_head_sha."""
+    try:
+        with open(os.path.join(path, ".git", "config")) as f:
+            lines = f.readlines()
+    except OSError:
+        return None
+    in_origin = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("["):
+            in_origin = stripped == '[remote "origin"]'
+        elif in_origin and stripped.startswith("url"):
+            return stripped.split("=", 1)[-1].strip()
+    return None
+
+
 def _git_sha(path: str) -> Optional[str]:
     try:
         out = subprocess.run(["git", "-C", path, "rev-parse", "HEAD"],
                              capture_output=True, text=True, timeout=10)
-        return out.stdout.strip() or None if out.returncode == 0 else None
+        if out.returncode == 0:
+            return out.stdout.strip() or None
     except (OSError, subprocess.SubprocessError):
-        return None
+        pass
+    return _dotgit_head_sha(path)
 
 
 def repo_sha() -> Optional[str]:
@@ -112,9 +165,11 @@ def _git_origin(path: str) -> Optional[str]:
     try:
         out = subprocess.run(["git", "-C", path, "remote", "get-url", "origin"],
                              capture_output=True, text=True, timeout=10)
-        return out.stdout.strip() or None if out.returncode == 0 else None
+        if out.returncode == 0:
+            return out.stdout.strip() or None
     except (OSError, subprocess.SubprocessError):
-        return None
+        pass
+    return _dotgit_origin_url(path)
 
 
 def _same_repo(a: str, b: str) -> bool:
