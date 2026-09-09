@@ -1,0 +1,382 @@
+================================================================================
+HOW T (num_target_nodes) WAS CHOSEN FOR EACH DATASET -- GraphGPS ARM
+================================================================================
+Written 2026-09-07. Covers the gps backbone only; the SAN arm must calibrate
+separately (see "Why T is per (backbone, dataset)" below).
+
+Final values, all measured against a trained gps/rwse/seed-0 checkpoint:
+
+    peptides-func     T = 8      window d in [26, 80]    max_dist 159
+    peptides-struct   T = 32     window d in [26, 80]    max_dist 159
+    pascalvoc-sp      T = 64     window d in [14, 28]    max_dist  54   (*)
+
+    (*) the VOC window was NARROWED from [14, 36] as part of this work; see
+        section 4. Nothing was reported under the old window.
+
+
+--------------------------------------------------------------------------------
+0. WHAT T IS, AND WHAT IT CONTROLS
+--------------------------------------------------------------------------------
+The probe measures s_bar(d) = mean ||d h_v / d x_u||_F over node pairs (u, v) at
+hop-distance d. For each sampled graph it draws T target nodes v uniformly
+(torch.randperm(n)[:T]) and differentiates against every source u. The headline
+statistic is
+
+    rho = sum_{d >= d_min} s_bar(d) / sum_{d >= 1} s_bar(d),   both cut at d_max
+
+T therefore controls how densely each graph's distance profile is observed. It
+does NOT control which graphs are probed (that is num_probe_graphs, 256) nor the
+window (that is dataset_meta.abs_rho_window).
+
+T enters rho in exactly two ways:
+
+  (a) BUCKET MEANS. s_bar(d) averages over uniformly drawn targets, so it is an
+      unbiased estimator of the population mean at that distance whatever T is.
+      T changes its VARIANCE, not its expectation.
+
+  (b) BUCKET INCLUSION. long_range_fraction skips buckets with no sampled pairs:
+      they contribute to NEITHER sum. Writing rho = N/D and dropping a far term x
+      from both,
+
+          (N - x) / (D - x)  <  N / D      whenever N < D, which always holds here
+
+      so an unpopulated far bucket does not merely add noise -- it biases rho
+      DOWNWARD, in the same direction as the effect the study looks for.
+
+(a) was verified empirically, not assumed. scripts/calibrate_target_nodes.py
+--demo sweeps T on synthetic graphs and reports:
+
+    T=  4  rho=0.13639  CI width=3.39e-02
+    T= 16  rho=0.13946  CI width=2.64e-02
+    T= 64  rho=0.13823  CI width=2.24e-02
+    T=128  rho=0.13825  CI width=2.19e-02
+
+rho is flat to within a fifth of its CI half-width across a 32x range of T; only
+the interval moves. The tool's own verdict on that sweep: "unbiased relative to
+T=128 at every rung ... binding constraint: ci_inflation".
+
+CONSEQUENCE, and it is the reason the three datasets are allowed to differ:
+T does not have to be identical across arms or datasets. It has to be SUFFICIENT
+in each. Coverage (b) is a floor set by graph topology and is shared by every
+model on a dataset; precision (a) is per model. Arms at different T remain
+unbiased relative to each other and differ only in interval width -- which
+matters for whether a gap can be CALLED, not for where the estimates sit.
+
+
+--------------------------------------------------------------------------------
+1. THE SELECTION CRITERION
+--------------------------------------------------------------------------------
+scripts/calibrate_target_nodes.py sweeps a ladder of T values on a fixed set of
+test graphs, computes rho at each rung with a graph-clustered bootstrap CI, and
+recommends the smallest rung that satisfies all three of:
+
+    rho stability   |rho(T) - rho(T_ref)| <= tol x the reference CI half-width,
+                    tol = 0.5, for that rung AND every rung above it. Requiring
+                    the whole tail rules out a rung that merely crosses the
+                    reference value on its way past.
+
+    tail density    the sparsest in-window bucket holds >= 5 pairs (min_bucket).
+                    A bucket with 3 pairs is a number, not an estimate.
+
+    CI inflation    that rung's own bootstrap interval is no more than 15% wider
+                    than the reference rung's. A rung can be unbiased and still
+                    underpowered.
+
+The reference rung is the densest one in the ladder. The bootstrap is CLUSTERED
+on graph identity, so a molecule's copies across seeds are resampled together
+rather than counted as independent evidence.
+
+Defaults used throughout: --n-graphs 20, --tol 0.5, --min-bucket 5,
+--max-ci-inflation 0.15, --n-boot 500, --seed 0.
+
+IMPORTANT CLI TRAP: --max-dist, --d-min and --d-max default to 20/5/20 (the demo
+values) and are NOT derived from --dataset. Every real calibration must pass them
+explicitly or it calibrates against a window the project never reports.
+
+
+--------------------------------------------------------------------------------
+2. peptides-func  ->  T = 8
+--------------------------------------------------------------------------------
+Checkpoint: results/raw/gps_rwse_peptides-func_seed0/0/ckpt/199.ckpt
+Window: d in [26, 80], max_dist 159.
+
+FIRST SWEEP (ladder 8..256, 10 graphs):
+
+    T     rho       CI width    pairs in window   saturated
+    8     0.52332   8.82e-02      5,896
+    16    0.52867   9.02e-02     12,273
+    32    0.52442   8.50e-02     24,125
+    64    0.52677   9.94e-02     48,010
+    128   0.53589   9.14e-02     96,313           3/10 graphs
+    256   0.53806   8.28e-02    166,370           7/10 graphs
+
+    Recommended T = 8 (reference 256, converged, binding: rho_stability)
+    WARNING: the reference rung is saturated on 7/10 graphs.
+
+Two problems with accepting that as it stood:
+
+  - SATURATION. T=256 exceeds the node count of 7 of the 10 calibration graphs
+    (peptides average 150 nodes), so randperm(n)[:T] returned all n. Those rungs
+    ENUMERATE rather than sample -- a different estimator, so "stable relative to
+    the densest sampling" was comparing against exhaustive enumeration.
+
+  - The pass was marginal. Band = 0.5 x half-width = 0.0207; the gap
+    |rho(8) - rho(256)| = 0.0147, i.e. 71% of the allowance. And nearly all of
+    that drift appeared at exactly the two saturated rungs (0.527 -> 0.536 ->
+    0.538).
+
+SECOND SWEEP (ladder 8..64, 20 graphs) -- ladder capped below the saturation
+point so the reference is genuine denser sampling, and graph count doubled
+because the interval is set by between-graph variance, not by T:
+
+    Recommended T = 8, converged, no saturation caveat.
+
+With T=64 as the reference the gap falls to |rho(8) - rho(64)| = 0.0034 against a
+band of 0.0249 -- 14% of the allowance rather than 71%.
+
+NOTE on why doubling the graphs makes the test STRICTER, not weaker: the
+tolerance is defined relative to the CI, so a WIDE interval makes convergence
+EASIER to declare. Narrowing it by adding graphs raises the bar.
+
+ADOPTED: T = 8.
+
+
+--------------------------------------------------------------------------------
+3. peptides-struct  ->  T = 32
+--------------------------------------------------------------------------------
+Checkpoint: results/raw/gps_rwse_peptides-struct_seed0/0/ckpt/199.ckpt
+Window: d in [26, 80], max_dist 159. Ladder 8..64, 20 graphs -- the SAME protocol
+as peptides-func's second sweep, deliberately, so the two are comparable.
+
+    T     rho       CI width    pairs in window   saturated
+    8     0.68061   1.45e-01      8,469
+    16    0.68283   1.53e-01     17,033
+    32    0.67181   1.28e-01     34,174
+    64    0.66709   1.17e-01     67,779           3/20 graphs
+
+    Recommended T = 32 (reference 64, converged, binding: ci_inflation)
+    Rungs 8 and 16 rejected for inflating the CI by more than 15% over the
+    reference. WARNING: the reference rung is saturated on 3/20 graphs.
+
+WHY THIS DIFFERS FROM peptides-func DESPITE IDENTICAL GRAPHS.
+These are the same 15,535 molecules with different labels -- same topology, same
+window, same ladder, same graph count. Only the trained model differs, and it
+needs 4x the target nodes. Two observations explain it:
+
+  - The binding constraint is different. peptides-func was limited by rho
+    stability with a CI flat in T; peptides-struct's CI genuinely NARROWS with T
+    (1.45e-01 -> 1.17e-01), so precision binds instead.
+
+  - rho itself predicts the requirement. A perfectly flat curve over this window
+    gives rho = 55/80 = 0.6875. peptides-struct sits at 0.667 -- almost no decay
+    across a ~90-hop diameter -- so two thirds of the DENOMINATOR comes from the
+    sparse far buckets, and noise enters both sums at once. peptides-func decays
+    to 0.53, so its denominator is dominated by near buckets, which are densely
+    sampled and precisely estimated. Higher rho => more of the statistic rests on
+    the thin tail => larger T.
+
+Supporting evidence: struct's CI is 0.117-0.153 on 20 graphs while func's first
+sweep was 0.083-0.099 on only 10. More graphs should narrow an interval; struct's
+is wider anyway, so its rho really is the noisier quantity.
+
+ACCEPTED CAVEAT. The reference rung T=64 is saturated on 3 of 20 graphs, and this
+is STRUCTURAL for this dataset rather than a protocol mistake:
+
+  - roughly 15% of peptides are under 64 nodes;
+  - validating T=32 requires a denser reference rung, and any rung dense enough
+    to serve will saturate those small molecules;
+  - raising --n-graphs does not help, because the FRACTION of small molecules is
+    unchanged; filtering them out would make the calibration unrepresentative of
+    what is actually probed.
+
+It cuts the right way in any case: for those 3 graphs T=64 gives the EXACT
+per-graph value, so T=32 is being compared against a partly-exact reference,
+which is a stricter bar than comparing it against more sampling. The caveat is
+emitted automatically into the paper-ready sentence by report_sentence().
+
+ADOPTED: T = 32, caveat disclosed.
+
+
+--------------------------------------------------------------------------------
+4. pascalvoc-sp  ->  T = 64  (after correcting the window)
+--------------------------------------------------------------------------------
+Checkpoint: results/raw/gps_rwse_pascalvoc-sp_seed0/0/ckpt/299.ckpt
+
+FIRST ATTEMPT, window d in [14, 36] (ladder 8..128, 20 graphs):
+
+    T     rho       CI width    pairs in window
+    8     0.35060   6.24e-02     23,101
+    16    0.35302   5.92e-02     45,512
+    32    0.35100   5.47e-02     91,082
+    64    0.35524   3.72e-02    183,814
+    128   0.38725   6.14e-02    370,997
+
+    FAILED: converged = False. "no rung below T=128 qualified -- rho had not
+    settled by the densest rung sampled."
+    NOTE: every rung left at least one in-window bucket with <5 pairs.
+
+Two signatures said this was not a sampling problem:
+
+  - rho was flat at ~0.353 through T=64 and then JUMPED to 0.387;
+  - the CI got WIDER at T=128 (6.14e-02) than at T=64 (3.72e-02). More sampling
+    producing a wider interval means the estimator changed character rather than
+    gaining precision.
+
+DIAGNOSIS -- THE WINDOW, NOT T. Diameters measured directly from the cached SPD
+matrices, 256 test graphs:
+
+    min 16    median 28    p90 30    p99 34    max 36
+
+d_max = 36 was the MAXIMUM diameter of an earlier 400-graph sample, i.e. the
+single most extreme graph. Bucket occupancy from a real probe (8 graphs, T=32)
+confirmed it: 17 of 23 in-window distances populated at all, and the top ones
+holding 164 / 83 / 19 / 5 / 1 pairs at d = 26 / 27 / 28 / 29 / 30. Distances
+31-36 are structurally unreachable for all but a handful of graphs.
+
+No T fixes that. Raising T samples more targets per graph, but a distance beyond
+a graph's diameter contains no pairs at any T. The tail was governed by rare
+large-diameter graphs, so as T rose, marginal buckets flickered between empty and
+populated and rho ratcheted upward each time one re-entered the sum -- exactly
+mechanism (b) from section 0.
+
+WINDOW CORRECTED: abs_rho_window["pascalvoc-sp"] = (14, 36) -> (14, 28).
+d_max = the MEDIAN diameter: report over distances at least half the graphs
+actually contain. d_min = 14 was already half the median and was never at issue.
+Projected bucket counts for a 256-graph probe at T=8, scaled from the measured
+8-graph run: d=26 ~1300, d=27 ~660, d=28 ~150, d=29 ~40, d=30 ~8 -- so 28 leaves
+every in-window bucket estimable and 30 does not.
+
+Peptides needed no such change, and shows where the line belongs: its d_max of 80
+sits BELOW its p90 diameter of 95, so many graphs realise it, and both peptides
+calibrations converged. VOC's 36 sat above its p99. That is now an invariant:
+p90_diameter is recorded per dataset in dataset_meta and
+tests/test_distance_axis.py asserts d_max <= p90_diameter.
+
+SECOND ATTEMPT, window d in [14, 28] (ladder 8..128, 20 graphs):
+
+    T     rho       CI width    pairs in window
+    8     0.31939   3.45e-02     23,097
+    16    0.32301   3.42e-02     45,507
+    32    0.32034   3.03e-02     91,076
+    64    0.32668   2.20e-02    183,805
+    128   0.32537   1.99e-02    370,955
+
+    Recommended T = 64 (reference 128, converged, binding: rho_stability)
+    No saturation. No thin-bucket note.
+
+The CI now narrows monotonically with T, which is what a well-posed estimator
+does. rho fell from ~0.35 to ~0.325 as expected: the sparse outlier buckets that
+were inflating it are gone.
+
+MARGINAL NOTE: T=32 was rejected by 0.000055 -- band 0.004975 against a gap of
+0.00503, about 1% of the allowance. T=32 is a defensible fallback if compute is
+tight (it halves probe cost, ~53 min vs ~1.75 h per cell) and is unbiased either
+way; T=64 was kept because scaled to 256 production graphs the intervals are
+roughly 0.0084 vs 0.0061, and the PE effects observed on peptides are only ~0.01,
+so the difference plausibly decides whether the arms separate at all.
+
+ADOPTED: T = 64, window (14, 28).
+
+
+--------------------------------------------------------------------------------
+5. POST-HOC VALIDATION ON PRODUCTION RUNS
+--------------------------------------------------------------------------------
+Calibration uses 20 graphs; the grid probes 256. scripts/check_probe_coverage.py
+re-checks the chosen T against finished results -- no model, no re-probe, reading
+only the per-bucket counts already stored in each record.
+
+peptides-func at T=8, first 7 completed cells:
+
+    all 7 OK -- 55/55 in-window buckets populated, min bucket 347-397 pairs,
+    and rho IDENTICAL at count thresholds k>=1, k>=10 and k>=30 (to 4 decimals),
+    i.e. no dependence on the thin buckets at all.
+
+That is the confirmation that matters: the T chosen on 20 calibration graphs
+holds on the 256-graph production probe.
+
+Run the same check on peptides-struct (T=32) and pascalvoc-sp (T=64) once those
+arms finish. The verdicts it can return are OK, MARGINAL, INADEQUATE (coverage or
+drift), UNKNOWN (record predates per-bucket counts) and DEGENERATE (no measurable
+long-range signal at all -- which is what it reported for the SAN VOC cells,
+whose sparse-attention configuration gives them an 8-hop receptive field against
+a window starting at 14).
+
+
+--------------------------------------------------------------------------------
+6. WHY T IS PER (BACKBONE, DATASET)
+--------------------------------------------------------------------------------
+COVERAGE is a floor set by the DATASET: which buckets a given T populates depends
+on graph topology alone, not on the model. Every arm on one dataset shares that
+minimum, and below it rho is biased downward in whichever arm falls short.
+
+PRECISION is per (backbone, dataset): it depends on the spread of ||d h/d x||
+across pairs, which is a property of the trained model. peptides-func and
+peptides-struct demonstrate this directly -- identical graphs, T=8 versus T=32.
+
+NOT per PE and NOT per seed. Same architecture, same width, same data; only the
+input encoding or the initialisation changes. That is an assumption, but a cheap
+one to hold: rho is unbiased in T, so being slightly off above the coverage floor
+costs interval width rather than correctness, and check_probe_coverage.py
+verifies it after the fact on every finished cell.
+
+The SAN arm must calibrate its own T. Its models differ from GPS's in depth,
+width and attention structure, so its precision requirement is its own -- and
+SAN's probe is considerably more expensive (full_graph=True is O(n^2) per graph),
+so inheriting GPS's value would be costly as well as unjustified.
+
+
+--------------------------------------------------------------------------------
+7. COMMANDS AS RUN
+--------------------------------------------------------------------------------
+All on TAU CS studentkillable, constrained to Turing GPUs (the Titan Xp nodes
+cannot run this env's CUDA 11.7 torch under the cluster's 580/CUDA-13 driver).
+
+peptides-func:
+  python scripts/calibrate_target_nodes.py \
+      --backbone gps --pe rwse --dataset peptides-func \
+      --checkpoint results/raw/gps_rwse_peptides-func_seed0/0/ckpt/199.ckpt \
+      --max-dist 159 --d-min 26 --d-max 80 --ladder 8 16 32 64 --n-graphs 20
+
+peptides-struct:
+  python scripts/calibrate_target_nodes.py \
+      --backbone gps --pe rwse --dataset peptides-struct \
+      --checkpoint results/raw/gps_rwse_peptides-struct_seed0/0/ckpt/199.ckpt \
+      --max-dist 159 --d-min 26 --d-max 80 --ladder 8 16 32 64 --n-graphs 20
+
+pascalvoc-sp:
+  python scripts/calibrate_target_nodes.py \
+      --backbone gps --pe rwse --dataset pascalvoc-sp \
+      --checkpoint results/raw/gps_rwse_pascalvoc-sp_seed0/0/ckpt/299.ckpt \
+      --max-dist 54 --d-min 14 --d-max 28 --ladder 8 16 32 64 128 --n-graphs 20
+
+Each writes results/calibration_target_nodes_gps_rwse_<dataset>.{csv,png}. The
+CSV holds one row per rung (rho, CI bounds, ci_width, pairs_in_window,
+min_bucket_count, graphs_saturated, seconds); the recommendation itself is
+printed, not persisted, but is recomputable from the CSV:
+
+  python - <<'EOF'
+  import sys, pandas as pd
+  sys.path.insert(0, 'src')
+  from calibration import recommend_target_nodes, report_sentence
+  rows = pd.read_csv('results/calibration_target_nodes_gps_rwse_peptides-func.csv') \
+           .to_dict('records')
+  rec = recommend_target_nodes(rows)
+  print(rec['recommended_T'], rec['limited_by'])
+  print(report_sentence(rec, rows, 26, 80))
+  EOF
+
+
+--------------------------------------------------------------------------------
+8. WHAT TO STATE WHEN REPORTING
+--------------------------------------------------------------------------------
+  - The three T values and that they were calibrated per (backbone, dataset),
+    with the reason they differ (section 3).
+  - peptides-struct's saturation caveat -- report_sentence() emits it verbatim.
+  - That VOC's window was NARROWED from (14, 36) to (14, 28) because the original
+    upper bound was unreachable for ~99% of graphs, with the diameter statistics
+    that justify it. Nothing was reported under the old window.
+  - rho is only comparable at a FIXED (d_min, d_max); always quote the window
+    beside the number.
+  - rho's null is not zero. For a flat curve it is (d_max - d_min + 1) / d_max:
+    0.6875 for peptides, 0.536 for VOC. Values must be read against that, not
+    against 0.
