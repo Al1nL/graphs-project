@@ -2058,7 +2058,7 @@ def make_san_model_fn(model, data, device=None):
 
     with torch.no_grad():
         h_content = base.embedding_h(feat.float() if feat.dtype.is_floating_point
-                                      else feat)
+                                     else feat)
         if hasattr(base, "in_feat_dropout"):
             h_content = base.in_feat_dropout(h_content)
 
@@ -2080,21 +2080,30 @@ def make_san_model_fn(model, data, device=None):
                 torch.zeros(g.num_edges(), dtype=torch.long, device=device))
         else:
             raise AttributeError(f"{type(base).__name__} has no embedding_e_fake "
-                                  "for the empty-edge-feature case.")
+                                 "for the empty-edge-feature case.")
 
         # PE channels, computed the same way each class's own forward() does, then
         # concatenated onto h_content -- together these form h^(0).
         if pe == "rwse":
-            rwse_enc = getattr(model, "rwse_encoder", None) or getattr(base, "rwse_encoder")
+            rwse_enc = getattr(model, "rwse_encoder", None) or getattr(base, "rwse_encoder", None)
+            if rwse_enc is None:
+                raise AttributeError(f"Could not find rwse_encoder on model or base for pe={pe}")
             pe_vec = rwse_enc(g.ndata["rwse"])
         elif pe == "signnet":
-            phi = getattr(model, "signnet_phi", None) or getattr(base, "signnet_phi")
+            phi = getattr(model, "signnet_phi", None) or getattr(base, "signnet_phi", None)
+            if phi is None:
+                raise AttributeError(f"Could not find signnet_phi on model or base for pe={pe}")
             EigVecs = g.ndata["EigVecs"]
             n, k = EigVecs.shape
             v = EigVecs.view(n * k, 1)
             pe_vec = (phi(v) + phi(-v)).view(n, k, -1).mean(dim=1)
         elif pe == "none":
-            pe_vec = None
+            if hasattr(model, "lpe_dim"):
+                lpe_dim = model.lpe_dim
+                pe_vec = torch.zeros(h_content.shape[0], lpe_dim, device=device, dtype=h_content.dtype)
+            else:
+                pe_vec = None
+
         else:  # lappe, grpe: eigenvector path through linear_A + PE_Transformer
             EigVecs, EigVals = g.ndata["EigVecs"], g.ndata["EigVals"]
             EigVecs_u = EigVecs.unsqueeze(-1)
