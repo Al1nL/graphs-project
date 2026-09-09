@@ -7,15 +7,16 @@ raw_data/
 
 # Run outputs. Checkpoints (results/raw/) and per-job SLURM logs (results/slurm_logs/)
 # are large and reproducible from a rerun -- excluded via the blanket results/* below.
-# The actual small deliverables -- the per-cell result JSONs and the calibration sweep
-# outputs -- are un-ignored explicitly so they can be committed and shared with
-# teammates without needing `git add -f`. job_ids.csv and the per-cell runs_*.csv (pure
-# bookkeeping, duplicate what the JSONs already say) stay excluded on purpose.
+# Everything else small and real -- per-cell result JSONs, the calibration sweep
+# outputs, the per-cell run CSVs, and the job_id<->cell tracking sheet -- is un-ignored
+# explicitly so it can be committed and shared with teammates without `git add -f`.
 results/*
 !results/.gitkeep
 !results/graphormer_*.json
 !results/calibration_*.csv
 !results/calibration_*.png
+!results/runs_graphormer_*.csv
+!results/job_ids.csv
 
 .venv/
 venv/

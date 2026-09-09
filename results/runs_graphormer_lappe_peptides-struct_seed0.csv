@@ -1,0 +1,2 @@
+run_id,backbone,pe,dataset,seed,status,metric_name,metric_value,num_params,train_time_seconds,peak_gpu_mem_mb,rho,rho_rel,n_shared_feats,num_target_nodes,max_dist,config_hash,code_sha,upstream_sha,pe_cache_version,started_at,finished_at,error
+graphormer_lappe_peptides-struct_seed0,graphormer,lappe,peptides-struct,0,ok,mae,0.267497718334198,796241,12815.25,,0.6933964726953153,0.5927596778075135,80,16,159,7cc73a5cf3f42565,8284c455a0348c98a71f30b65fb2b36f2eae2137,a04573c40705fb174db261bb746a8258d00992f5,2,2026-09-05T17:15:59,2026-09-05T20:49:34,
