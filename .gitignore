@@ -6,8 +6,8 @@ cache/
 raw_data/
 
 # Run outputs. results/*.json are produced by run_experiment.py; keep the dir, not the runs.
-results/
 !results/.gitkeep
+!results/*.json
 
 .venv/
 venv/
@@ -16,7 +16,6 @@ venv/
 cache
 raw_data
 logs/
-results/
 1
 files.zip
 check_shrinkage.py
