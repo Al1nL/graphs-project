@@ -192,6 +192,11 @@ def sample_test_graphs(test_dataset, n_graphs: int, seed: int):
     return [(i, test_dataset[i]) for i in idx]
 
 
+def _probe_checkpoint_path(backbone: str, pe: str, dataset: str, seed: int, results_dir: str) -> str:
+    return os.path.join(
+        results_dir, f"_probe_checkpoint_{backbone}_{pe}_{dataset}_seed{seed}.pt")
+
+
 def run_probe(trained_model, backbone: str, test_dataset, run_cfg) -> dict:
     """Run the shared sensitivity probe over a sample of test graphs for one trained model.
 
@@ -199,13 +204,44 @@ def run_probe(trained_model, backbone: str, test_dataset, run_cfg) -> dict:
     Callers that only have a task metric to report (backbone not in PROBE_WIRED_BACKBONES)
     should skip this entirely rather than call it -- it raises NotImplementedError via
     make_model_fn otherwise, which is correct but not a useful way to find that out.
+
+    CHECKPOINTED PER GRAPH: added after repeated observations of probe-only runs (training
+    already finished, san_train's skip-training path loads the saved model straight into
+    here) exceeding the cluster's 24h wall-clock limit and getting killed -- with NO
+    per-graph checkpoint, every such kill discarded ALL probe progress, and a resubmit
+    restarted the full probe from graph 0. For a combo whose true probe time exceeds 24h,
+    this was an infinite loop that could never finish. Each completed graph's result is now
+    saved to `_probe_checkpoint_<backbone>_<pe>_<dataset>_seed<seed>.pt` in run_cfg's
+    results_dir immediately after that graph finishes; on entry, any already-completed
+    graph_ids found in that file are skipped rather than recomputed. `sample_test_graphs`
+    is deterministic in (test_dataset, n_graphs, seed), so a resumed call produces the
+    identical graph_id list -- skipping by id is safe, not an approximation. The checkpoint
+    is deleted once every sampled graph is present (i.e. the probe genuinely completed),
+    mirroring san_train's own training-checkpoint lifecycle.
     """
+    import torch  # local import, matching sample_test_graphs's existing pattern in this file
+
     graphs = sample_test_graphs(test_dataset, run_cfg.resolved_num_probe_graphs(),
                                  run_cfg.seed)
     max_dist = run_cfg.resolved_max_dist()
+
+    ckpt_path = _probe_checkpoint_path(
+        run_cfg.backbone, run_cfg.pe, run_cfg.dataset, run_cfg.seed, run_cfg.results_dir)
     per_graph = []
     n_shared_feats_used = None
+    done_ids = set()
+    if os.path.exists(ckpt_path):
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+        per_graph = ckpt["per_graph"]
+        n_shared_feats_used = ckpt.get("n_shared_feats_used")
+        done_ids = {r["graph_id"] for r in per_graph}
+        print(f"  [probe-resume] found {len(done_ids)}/{len(graphs)} already-probed "
+              f"graph(s) at {ckpt_path} -- skipping those, continuing from where it "
+              f"left off.", flush=True)
+
     for graph_id, data in graphs:
+        if int(graph_id) in done_ids:
+            continue
         model_fn, probe_data, meta = make_model_fn(trained_model, backbone, data)
         if n_shared_feats_used is None:
             # RECOMMENDATION from graphgps_backend.probe_widths(): use dim_inner, the width
@@ -220,6 +256,21 @@ def run_probe(trained_model, backbone: str, test_dataset, run_cfg) -> dict:
         diam = graph_diameter(probe_data.edge_index, probe_data.num_nodes)
         per_graph.append({"graph_id": int(graph_id), "curve": curve,
                           "diameter": diam, "num_nodes": int(probe_data.num_nodes)})
+
+        # Checkpoint after EVERY graph, not just at the end -- a single graph's probe can
+        # itself take a meaningful fraction of the wall-clock budget on this PyTorch
+        # version's unbatched fallback, so this is the finest granularity available without
+        # checkpointing mid-graph (which would need to tie into compute_sensitivity_curve's
+        # own basis-vector chunking loop -- out of scope here; per-graph is already a large
+        # improvement over per-entire-probe).
+        tmp = ckpt_path + ".tmp"
+        torch.save({"per_graph": per_graph, "n_shared_feats_used": n_shared_feats_used}, tmp)
+        os.replace(tmp, ckpt_path)
+
+    if os.path.exists(ckpt_path):
+        os.remove(ckpt_path)  # probe genuinely finished -- clean up so a future,
+                               # unrelated run of this same combo doesn't find a stale file
+
     return {
         "pooled_curve": average_curves([r["curve"] for r in per_graph]),
         "per_graph": per_graph,
