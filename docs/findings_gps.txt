@@ -1,29 +1,47 @@
 ================================================================================
-FINDINGS -- GraphGPS ARM, PEPTIDES-FUNC AND PEPTIDES-STRUCT
+FINDINGS -- GraphGPS ARM, ALL THREE DATASETS
 ================================================================================
-Written 2026-09-09, after 24 of 24 peptides cells completed.
+Written 2026-09-09, extended 2026-09-13 when the grid reached 36 of 36 cells.
 Source: results/summary_table.csv, results/*.json, scripts/check_probe_coverage.py.
 
-Scope: gps backbone only. pascalvoc-sp not yet run. The SAN arm is not comparable
-yet (its only VOC cells were degenerate for a configuration reason -- see §8).
-GRPE is unimplemented on both backbones, so the PE axis here is FOUR arms, not
-five.
+Scope: gps backbone only, complete -- 4 PE arms x 3 seeds x 3 datasets. The SAN
+arm is not comparable yet (its only VOC cells were degenerate for a configuration
+reason -- see §9). GRPE is unimplemented on both backbones, so the PE axis here is
+FOUR arms, not five; the nominal 45-cell grid is 36 runnable cells.
+
+ONE-LINE SUMMARY. Positional encodings reshape where a GPS model's sensitivity
+lives only on the dataset where they do substantial work for the task. On
+peptides-struct, where a PE cuts MAE by 33%, all three PEs significantly reduce
+relative long-range mass. On peptides-func (PE buys +4% AP) and on pascalvoc-sp
+(PE HURTS, -4% F1) nothing separates from no-PE at all.
 
 
 --------------------------------------------------------------------------------
 1. WHAT WAS RUN
 --------------------------------------------------------------------------------
-4 PE arms (none, lappe, rwse, signnet) x 3 seeds x 2 datasets = 24 cells, each
-trained to the GraphGPS reference recipe (200 epochs, batch 128, dim 96, 4 GPS
-layers) and probed on 256 test graphs.
+4 PE arms (none, lappe, rwse, signnet) x 3 seeds x 3 datasets = 36 cells, each
+trained to the GraphGPS reference recipe (200 epochs for peptides, 300 for VOC;
+batch 128 / 32; dim 96; 4 GPS layers) and probed on 256 test graphs.
 
-    peptides-func     T = 8    window d in [26, 80]
-    peptides-struct   T = 32   window d in [26, 80]
+    peptides-func     T = 8    window d in [26, 80]    max_dist 159
+    peptides-struct   T = 32   window d in [26, 80]    max_dist 159
+    pascalvoc-sp      T = 64   window d in [14, 28]    max_dist  54
 
 T was calibrated per dataset; see docs/target_node_calibration_gps.txt for how and
-why they differ. check_probe_coverage.py reports 12/12 OK on both datasets: every
-in-window bucket populated, and rho identical at count thresholds k>=1, k>=10 and
-k>=30, i.e. no dependence on thin buckets at all.
+why they differ. check_probe_coverage.py reports 12/12 OK on ALL THREE datasets:
+every in-window bucket populated, and rho identical at count thresholds k>=1,
+k>=10 and k>=30, i.e. no dependence on thin buckets at all.
+
+VOC's window was NARROWED from (14, 36) to (14, 28) before these runs, because the
+original d_max was the maximum diameter of a sample -- unreachable for ~99% of
+graphs -- and calibration could not converge against it. Full account in the
+calibration document. Nothing was ever reported under the old window.
+
+VOC's nine non-signnet cells and all three signnet cells were initially probed at
+T=14 by a submission error and were RE-PROBED at T=64 from their saved
+checkpoints. Only the T=64 results are reported. The T=14 numbers agreed to within
+0.006 on rho, which is what the calibration predicts (rho is unbiased in T; only
+the interval width changes), but they are superseded.
 
 Two statistics, both pre-specified in docs/analysis-plan.md:
 
@@ -81,16 +99,40 @@ peptides-func -- NOTHING separates. Every arm overlaps none:
     rwse      0.5032    [0.4975, 0.5091]    -0.0028    0.6459 +/- 0.0035
     signnet   0.5185    [0.5120, 0.5249]    +0.0125    0.6198 +/- 0.0177
 
+pascalvoc-sp -- NOTHING separates, and here the PEs HURT the task:
+
+    arm       rho_rel   95% CI              vs none    F1 (higher better)
+    none      0.3173    [0.3139, 0.3214]     --        0.3929 +/- 0.0079
+    lappe     0.3238    [0.3201, 0.3279]    +0.0065    0.3738 +/- 0.0073
+    rwse      0.3188    [0.3148, 0.3230]    +0.0015    0.3807 +/- 0.0065
+    signnet   0.3130    [0.3087, 0.3177]    -0.0043    0.3595 +/- 0.0079
+
+    Every interval overlaps none's. The spread across all four arm MEANS is
+    0.0120 -- barely more than the largest within-arm seed sd of 0.0094. See §8.
+
 READING. The effect appears exactly where positional encodings actually matter
 for the task. On peptides-struct a PE cuts MAE from 0.374 to 0.251 -- a 33%
 improvement -- and every PE simultaneously pulls sensitivity NEARER in relative
 terms. On peptides-func a PE buys only 0.629 -> 0.654 AP, and the sensitivity
 profile does not move measurably.
 
+On pascalvoc-sp a PE makes the task WORSE -- none scores 0.3929 F1 against
+lappe's 0.3738 -- and again the sensitivity profile does not move. (That the PEs
+hurt on VOC is not our finding: the GPS paper reports the same, 0.3846 without
+LapPE against 0.3748 with it. Both the direction and the magnitude match.)
+
+So across three datasets the pattern is not "PEs extend reach" and not "PEs
+shorten reach", but:
+
+    PE helps the task a lot   ->  significant REDUCTION in relative far mass
+    PE helps a little         ->  no measurable change
+    PE hurts                  ->  no measurable change
+
 This is the OPPOSITE of the naive hypothesis that positional encodings extend a
-model's effective reach. On this evidence they do the reverse: they let the model
-resolve structure locally instead of leaning on diffuse long-range attention, and
-the task improves as a result.
+model's effective reach. Where they do real work, they do the reverse: they let
+the model resolve structure locally instead of leaning on diffuse long-range
+attention, and the task improves as a result. Where they do not help the task,
+they leave the sensitivity profile alone.
 
 Note also where none sits relative to the flat null of 0.5. On peptides-func
 every arm is within 0.02 of it -- sensitivity is nearly uniform in relative
@@ -118,6 +160,19 @@ REVERSED -- both directions statistically clean:
     lappe               0.5139       -0.0098 ns   0.4970      -0.0090 ns
     rwse                0.5353       +0.0116 ns   0.5032      -0.0028 ns
     signnet             0.5521       +0.0284 ***  0.5185      +0.0125 ns
+
+    pascalvoc-sp        rho (abs)    vs none      rho_rel     vs none
+    none                0.3276        --          0.3173       --
+    lappe               0.3389       +0.0113 (*)  0.3238      +0.0065 ns
+    rwse                0.3330       +0.0054 ns   0.3188      +0.0015 ns
+    signnet             0.3265       -0.0011 ns   0.3130      -0.0043 ns
+
+    (*) CIs disjoint by 0.0011, but the seed ranges overlap and the ordering
+        reverses on seed 0. NOT an effect -- see §8.
+
+    On VOC the two axes AGREE, which is the control §4 needs: its diameters are
+    uniform (median 28, p90 30), so the two windows nearly coincide and the
+    disagreement below has nothing to act on.
 
 THIS IS NOT A CONTRADICTION, and the write-up must say so explicitly or a reader
 will assume one table is wrong.
@@ -148,6 +203,7 @@ rwse    The clearest effect on the absolute axis (+0.012 func, +0.043 struct,
         effect on the ranking axis for struct. Its seed spread is the tightest of
         any arm on func (sd 0.0018), so its estimates are stable. It has the
         worst task metric of the three PEs on struct (MAE 0.279 vs lappe 0.251).
+        On VOC: +0.005 absolute, +0.002 relative, both ns.
 
 lappe   Best task metric on BOTH datasets (0.6537 AP, 0.2505 MAE) and the one
         that reproduces the paper. On absolute rho it does essentially nothing
@@ -155,31 +211,40 @@ lappe   Best task metric on BOTH datasets (0.6537 AP, 0.2505 MAE) and the one
         largest reduction on struct (-0.061 ***). So the encoding that helps the
         task most is not the one that moves absolute long-range mass at all --
         a dissociation between task accuracy and sensitivity profile.
+        On VOC it is the WORST of the four on task (0.3738 F1 vs none's 0.3929)
+        and carries the only apparently-significant VOC comparison, which §8
+        shows is an artefact of reading the CI without the seed sd.
 
 signnet Separated from none on absolute rho on BOTH datasets, but with OPPOSITE
         signs: +0.028 on func, -0.058 on struct. Three seeds each, non-
         overlapping ranges, so not a small-sample artefact. On the ranking axis
         it is the largest reduction on struct (-0.067) and the only arm above
         none on func (+0.013, ns).
-        DO NOT report this as a property of the encoding without addressing two
-        confounds -- see §7.
+        On VOC it is the lowest arm on both axes and the worst on task (0.3595
+        F1), but every VOC comparison is ns.
+        DO NOT report the peptides sign flip as a property of the encoding
+        without addressing two confounds -- see §7.
 
-none    The reference. Its absolute rho differs sharply between the two datasets
-        (0.524 vs 0.627) even though the graphs are identical, which is a
-        reminder that rho measures the TRAINED MODEL, not the dataset.
+none    The reference, and the BEST arm on VOC's task metric (0.3929 F1). Its
+        absolute rho differs sharply between the two peptides datasets (0.524 vs
+        0.627) even though the graphs are identical, which is a reminder that
+        rho measures the TRAINED MODEL, not the dataset.
 
 
 --------------------------------------------------------------------------------
-6. CURVE SHAPES -- THE TWO TASKS ARE QUALITATIVELY DIFFERENT
+6. CURVE SHAPES -- THE THREE TASKS ARE QUALITATIVELY DIFFERENT
 --------------------------------------------------------------------------------
 Pooled s_bar(d), the none arm:
 
     peptides-func     d=1: 33.1   d=2: 9.4   d=13: 3.6   d=26: 3.0   d=53: 2.4   d=80: 2.2
     peptides-struct   d=1: 20.7   d=2: 5.1   d=13: 1.9   d=26: 1.9   d=53: 2.0   d=80: 2.1
+    pascalvoc-sp      d=1:  7.5   d=2: 1.9   d= 7: 0.85  d=14: 0.63  d=21: 0.58  d=28: 0.60
 
 peptides-func decays monotonically. peptides-struct is U-SHAPED: it falls to a
 minimum near d=13 and then RISES again out to d=80. Sensitivity to the most
-distant nodes exceeds sensitivity to mid-range ones.
+distant nodes exceeds sensitivity to mid-range ones. pascalvoc-sp decays and then
+FLATTENS -- essentially constant from d=14 out to d=28, with a slight uptick at
+the end.
 
 That is physically sensible. peptides-struct predicts global geometric
 descriptors (inertia, length, sphericity), which depend most on where a chain's
@@ -193,9 +258,12 @@ The PE effect on struct lives in that tail slope. From d=13 to d=80:
     lappe     0.83 -> 1.18   (+43%)
     signnet   0.75 -> 0.63   (-17%)   suppresses it entirely
 
+Note that VOC's absolute magnitudes are 4-5x smaller than peptides' at every
+distance, which is why a ratio statistic is the only way to compare them at all.
+
 Both statistics are ratios, which is necessary rather than cosmetic: the raw gain
-s_bar(1) spans 18.9 to 37.3 on func and 9.7 to 20.7 on struct, a 2-4x range
-across arms. Any comparison of unnormalised magnitudes would be measuring overall
+s_bar(1) (per-arm pooled) spans 18.9 to 37.3 on func, 9.7 to 20.7 on struct and
+5.2 to 7.5 on VOC -- a 1.4x to 2.1x range across arms within a single dataset. Any comparison of unnormalised magnitudes would be measuring overall
 model gain, not where sensitivity lives.
 
 
@@ -225,12 +293,22 @@ Other limitations:
     so they are dominated by between-graph rather than between-seed variation,
     but the seed axis itself is thin.
 
-  - The CIs quoted are MARGINAL. Every arm probes the same 692 molecules at the
-    same seeds, so a PAIRED difference (per-graph rho_A - rho_B, bootstrapped
-    over graphs) would cancel the shared graph-level variance and give
-    substantially tighter intervals. On peptides-func, where nothing separates
-    marginally, that analysis could plausibly resolve effects the current
-    intervals cannot. NOT YET DONE.
+  - THE BOOTSTRAP CI IS NOT THE ONLY UNCERTAINTY, and on VOC it is not the
+    binding one. It resamples GRAPHS, so it measures how precisely the mean over
+    this graph sample is estimated -- not reproducibility across training runs.
+    On three of four VOC arms the seed sd EXCEEDS the CI half-width (up to
+    1.94x), and one comparison there has disjoint CIs while its seed ranges
+    overlap and its ordering reverses on one seed. Quote rho_seed_std beside
+    every interval; call an effect only when it clears both. Full treatment in
+    §8. This does not touch §3: peptides-struct's effects clear the seed axis by
+    2-6x.
+
+  - The CIs quoted are MARGINAL. Every arm probes the same 692 molecules (634 on
+    VOC) at the same seeds, so a PAIRED difference (per-graph rho_A - rho_B,
+    bootstrapped over graphs) would cancel the shared graph-level variance and
+    give substantially tighter intervals. On peptides-func, where nothing
+    separates marginally, that analysis could plausibly resolve effects the
+    current intervals cannot. NOT YET DONE.
 
   - Training budget follows each backbone's own reference recipe: 200 epochs for
     GPS here, 100 for SAN. Defensible, but a difference along the axis being
@@ -242,21 +320,64 @@ Other limitations:
 
 
 --------------------------------------------------------------------------------
-8. WHAT PASCALVOC-SP WILL TEST
+8. PASCALVOC-SP: A CLEAN NULL -- AND WHY THE BOOTSTRAP CI MUST NOT BE QUOTED
+   ALONE HERE
 --------------------------------------------------------------------------------
-VOC is the strongest available test of whether §3 is a property of positional
-encodings or of long-chain molecular graphs. Its graphs are ~480-node superpixel
-graphs with TIGHTLY CLUSTERED diameters -- median 28, p90 30, p99 34 -- against
-peptides' 16-to-159 spread.
+VOC was the strongest available test of whether §3 is a property of positional
+encodings or of long-chain molecular graphs, for two reasons. Its graphs are
+~480-node superpixel graphs with TIGHTLY CLUSTERED diameters (median 28, p90 30,
+p99 34) against peptides' 16-to-159 spread -- so the absolute window (14, 28) and
+the relative window (d/diam > 0.5, i.e. d > ~14) nearly COINCIDE, and the two
+statistics should agree. And it is the one dataset where a PE makes the task
+worse, so it separates "PE present" from "PE useful".
 
-That matters directly: with diameters that concentrated, the absolute window
-(14, 28) and the relative window (d/diam > 0.5, i.e. d > ~14) nearly COINCIDE. So
-VOC is the case where the two statistics should agree, and any disagreement there
-would indicate something other than diameter heterogeneity.
+RESULT: a null on both axes.
 
-Prediction implied by §3: if PEs reduce relative long-range mass generally, the
-same ordering should appear on VOC. If it does not, the effect is specific to
-graphs with long thin structure.
+    arm       rho      95% CI            seed sd   rho_rel   95% CI            F1
+    none      0.3276   [0.3235,0.3329]   0.0091    0.3173    [0.3139,0.3214]   0.3929
+    lappe     0.3389   [0.3340,0.3452]   0.0067    0.3238    [0.3201,0.3279]   0.3738
+    rwse      0.3330   [0.3285,0.3391]   0.0094    0.3188    [0.3148,0.3230]   0.3807
+    signnet   0.3265   [0.3214,0.3329]   0.0055    0.3130    [0.3087,0.3177]   0.3595
+
+The two axes DO agree here, as predicted: same ordering, same non-separation. That
+is a useful check on §4's explanation -- the peptides disagreement between the two
+axes really was diameter heterogeneity, because it vanishes on the dataset whose
+diameters are uniform.
+
+THE CI TRAP. One comparison above looks significant and is not:
+
+    lappe vs none on absolute rho: CIs [0.3340,0.3452] and [0.3235,0.3329] are
+    DISJOINT -- by 0.0011.
+
+Do not report that as an effect. The per-seed values are
+
+    none   0.3386  0.3267  0.3207
+    lappe  0.3304  0.3432  0.3398
+
+whose ranges overlap substantially, and on SEED 0 the ordering reverses (none
+above lappe). The bootstrap resamples GRAPHS, so it measures how precisely the
+mean sensitivity of these 634 graphs is estimated -- not how reproducible the
+result is across training runs. Those are different questions, and here they give
+different answers:
+
+    arm       CI half-width    seed sd    ratio
+    none         0.0047        0.0091     1.94x
+    rwse         0.0053        0.0094     1.77x
+    lappe        0.0056        0.0067     1.20x
+    signnet      0.0057        0.0055     0.96x
+
+Where the seed sd EXCEEDS the CI half-width, the CI is not the binding
+uncertainty and must not be quoted as significance on its own. On VOC it exceeds
+it for three arms of four.
+
+Why this does not undermine §3: on peptides-struct the PE effects are 0.043-0.067
+against seed sds of 0.007-0.019, so they survive the seed axis by a factor of
+2-6. On VOC the effects are 0.001-0.007 against seed sds of 0.006-0.009, i.e.
+below the seed noise floor. The peptides result is robust to this concern; the VOC
+non-result is what it looks like either way.
+
+RULE FOR THE WRITE-UP: quote rho_seed_std beside every interval, and call an
+effect only when it clears BOTH. summary_table.csv already carries both columns.
 
 A note on the SAN arm, relevant to any cross-backbone claim. Its only completed
 VOC cells were DEGENERATE -- rho = 0 exactly, because SAN was configured with
@@ -269,20 +390,26 @@ claim and must be re-run with full_graph=True or dropped with the reason stated.
 --------------------------------------------------------------------------------
 9. WHAT I WOULD DO NEXT, IN ORDER
 --------------------------------------------------------------------------------
-1. Run the two VOC arrays. Nine non-signnet cells and signnet's three separately,
-   the latter at --time=1440 (it trains ~3x slower and probes ~2x slower than the
-   other arms).
+1. GPS COMPUTE IS DONE -- 36/36. Nothing further is needed from the cluster for
+   this arm unless item 3 is taken up.
 
 2. Add the PAIRED bootstrap. It is the single change most likely to convert
    peptides-func from "nothing separates" into a usable result, and it costs no
    compute -- the per-graph curves are already stored in every result JSON.
 
 3. Rerun signnet at dim_pe 16. Brings it into the parameter band, likely removes
-   the batch workaround, and is the only way its sign flip becomes reportable.
+   the batch workaround, and is the only way its sign flip between the two
+   peptides datasets becomes reportable. 12 cells, ~3 days at signnet's pace.
+   Optional: signnet carries no part of the headline result, and dropping the arm
+   with a stated reason is a defensible alternative to re-running it.
 
 4. Decide how peptides-struct's U-shaped curve is presented. It is arguably the
    most interesting single observation here and it is not visible in either rho
    statistic -- both integrate over the window and lose the shape.
 
-5. Do not draw cross-backbone conclusions until SAN's VOC configuration is
+5. Report seed sd beside every CI, per §8. This is a presentation change, not an
+   analysis one, and it prevents the one wrong claim these numbers invite
+   (lappe vs none on VOC absolute rho).
+
+6. Do not draw cross-backbone conclusions until SAN's VOC configuration is
    resolved and its peptides cells exist.
