@@ -1,0 +1,197 @@
+\documentclass[10pt]{article}
+\usepackage[letterpaper, top=1in, bottom=1in, left=0.85in, right=0.85in, columnsep=0.28in]{geometry}
+\usepackage{times}
+\usepackage{microtype}
+\usepackage{titlesec}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=black, citecolor=black, urlcolor=blue}
+
+\titleformat{\section}{\normalfont\bfseries\fontsize{12}{14}\selectfont}{\thesection}{0.6em}{}
+\titleformat{\subsection}{\normalfont\bfseries\itshape\fontsize{10.5}{13}\selectfont}{\thesubsection}{0.6em}{}
+\titlespacing{\section}{0pt}{7pt}{3pt}
+\titlespacing{\subsection}{0pt}{5pt}{2.5pt}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{3pt}
+\linespread{0.985}
+
+\title{\vspace{-1em}}
+\begin{document}
+
+\makeatletter
+\twocolumn[
+\begin{@twocolumnfalse}
+  \begin{center}
+    {\Large\bfseries How Do Positional Encodings Affect\\Long-Range Sensitivity in Graph Transformers?}
+
+    \vspace{3pt}
+    {\normalsize\itshape A Multi-Backbone, Multi-Dataset Study}
+
+    \vspace{6pt}
+    {\normalsize Liora Yacob \quad Paz Flashner \quad Lior Pernik \quad Alin Loshevsky}
+
+    \vspace{2pt}
+    {\small\itshape Machine Learning with Graphs --- Final Project\\ Blavatnik School of Computer Science, Tel Aviv University}
+  \end{center}
+  \vspace{6pt}
+  \begin{center}
+  \begin{minipage}{0.94\textwidth}
+  \small
+  \textbf{Abstract}\,---\, Graph Transformers (GTs) replace the hop-by-hop message-passing bottleneck of standard GNNs with global self-attention, but without an explicit structural signal, attention treats all node pairs symmetrically. Positional encodings (PEs) supply that missing structure, either as node features (absolute PEs) or as attention-logit biases (relative PEs). Black et al. (2024) show these families are equi-expressive, and GraphGPS (Rampasek et al., 2022) shows PEs combined with a hybrid GNN+Transformer backbone give strong Long Range Graph Benchmark (LRGB) results -- but neither isolates whether PE choice improves \emph{sensitivity to distant nodes}, nor varies backbone or graph regime. We extend our original single-backbone, single-dataset proposal to a 3-backbone (GraphGPS, SAN, Graphormer) $\times$ 5-PE $\times$ 3-dataset grid, reporting the 37 of 45 cells we were able to train. For each cell we report task performance and a scale-free, Jacobian-based sensitivity statistic $\rho_{\text{rel}}$, and find PE rankings are \emph{not} stable across backbones: backbones broadly agree on which PE is most local (Kendall's $W{=}0.82$ on Peptides-struct), yet the \emph{sign} of the correlation between that ranking and task performance flips between GraphGPS and Graphormer on the same dataset.
+  \end{minipage}
+  \end{center}
+  \vspace{6pt}
+\end{@twocolumnfalse}
+]
+\makeatother
+
+\section{Introduction}
+Message-passing GNNs compress information from an exponentially growing neighbourhood into a fixed-size vector -- over-squashing (Alon and Yahav, 2021) -- which hurts tasks whose label depends on distant structure. Graph Transformers attend over all node pairs directly, at the cost of losing structure unless it is reintroduced through a positional encoding (PE): absolute PEs (APEs) augment node features (Laplacian eigenvectors, random-walk statistics); relative PEs (RPEs) bias the attention score for a pair directly (shortest-path distance, edge type). Black et al.\ (2024) prove APEs and RPEs equi-expressive, but expressivity says nothing about \emph{sensitivity} -- two PEs can distinguish the same graphs while producing very different gradients between distant nodes in one graph. GraphGPS (Rampasek et al., 2022) gets strong LRGB results from several PEs but never isolates how much of that gain is the PE's effect on long-range flow versus the backbone's own inductive bias.
+
+Our original proposal fixed GraphGPS and Peptides-func and ranked five PEs by sensitivity; reviewer feedback correctly noted that ranking could be an artifact of the one backbone or dataset chosen. This report is the expanded design and its outcome: three architecturally distinct backbones (GraphGPS, SAN, Graphormer) and three LRGB datasets, so the evaluation protocol itself stays fixed while backbone and graph regime vary. Two of fifteen (backbone, PE) combinations never trained to completion (GraphGPS+GRPE; Graphormer's PascalVOC-SP arm; \S3), leaving 37 of 45 nominal (backbone, PE, dataset) cells, all with 3 seeds. The headline finding is not a PE ranking but that PE effects on sensitivity and on task performance are both backbone-conditional -- and conditional in different, dissociable ways (\S5), which is itself the answer to the reviewer's concern.
+
+\section{Related Work}
+\textbf{PEs.} Feature-level PEs: Laplacian eigenvectors (Dwivedi and Bresson, 2020; Kreuzer et al., 2021), random-walk encodings (RWSE), sign/basis-invariant spectral encoders (SignNet; Lim et al., 2023). Attention-bias PEs: Graphormer's centrality/spatial/edge encodings (Ying et al., 2021) and GRPE's node-to-relation extension (Park et al., 2022).
+
+\textbf{Backbones.} GraphGPS (Rampasek et al., 2022) hybridizes a message-passing branch with a Transformer branch, contributing a local, edge-respecting inductive bias \emph{alongside} global attention rather than in place of it. SAN (Kreuzer et al., 2021) commits to full (or sparse) attention from the start with a dedicated learned spectral PE module, contributing the inductive bias that structure should be learned from the Laplacian spectrum rather than supplied by a message-passing prior at all. Graphormer (Ying et al., 2021) uses pure attention with no message-passing branch, contributing the inductive bias that all structure -- centrality, distance, edges -- enters as an attention bias rather than a node feature, which is also the mechanism GRPE extends. Concretely, these three fix the \emph{amount} of message-passing inductive bias at three points -- full (GraphGPS), spectral-only (SAN), none (Graphormer) -- rather than being three interchangeable GT implementations; that is what lets a PE effect measured on one of them be attributed to the PE rather than to an arbitrary architectural choice.
+
+\textbf{Expressivity vs.\ sensitivity.} Black et al.\ (2024) show APE/RPE equivalence via WL-style expressivity, which says nothing about gradient magnitude between distant nodes; Di Giovanni et al.\ (2023) give a Jacobian-norm sensitivity bound for MPNNs, adopted here across GT backbones. LRGB (Dwivedi et al., 2022) exists because standard small-graph benchmarks don't require long-range reasoning; we use its own splits/metrics throughout to avoid the protocol inconsistency documented across the field (Errica et al., 2020; Bechler-Speicher et al., 2025).
+
+\textbf{The gap.} No existing work varies PE, backbone, and dataset simultaneously while holding the sensitivity metric itself fixed. Black et al.\ (2024) vary PE family but measure expressivity, not sensitivity, and use no fixed backbone grid. GraphGPS varies PE but fixes both backbone and evaluation to task performance alone. Di Giovanni et al.\ (2023) fix the sensitivity metric but never touch PEs or Graph Transformers. Consequently no prior result can distinguish a PE's effect on long-range sensitivity from an artifact of the one backbone or dataset it happened to be measured on -- the gap \S3's design is built to close.
+
+\section{Method}
+\label{sec:setup}
+\subsection{Backbones and PEs}
+GraphGPS ($\approx$500K params, GatedGCN+Transformer), SAN (full attention on Peptides, sparse edge-only on PascalVOC-SP, dedicated learned spectral PE), Graphormer (pure attention, all structure as attention bias). All five PEs -- No-PE, LapPE (16 eigenvectors), RWSE (20-step return probabilities), SignNet-PE (DeepSets over eigenvectors, Lim et al., 2023), GRPE (T5-bucketed shortest-path/edge-type bias, Park et al., 2022) -- are computed once from a shared implementation, never reimplemented per backbone.
+
+Table~\ref{tab:pefit} shows which (PE, backbone) cells are native vs.\ adapted, and which trained. GraphGPS+GRPE needs an attention-bias hook into \texttt{GPSLayer} that was designed but never wired into training (\texttt{src/backends/\allowbreak graphgps\_backend.py} raises rather than running it) -- 36 of 45 GraphGPS-arm cells run instead of 45. Graphormer's PascalVOC-SP arm did not train either: its dense $O(n^2)$ attention on $\sim$480-node graphs was not tractable in our compute budget, the same reason LRGB itself gives for excluding SAN from COCO-SP (\S4).
+
+\begin{table}[h]
+\centering\footnotesize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{lp{0.13\textwidth}p{0.13\textwidth}p{0.13\textwidth}}
+\toprule
+\textbf{PE} & \textbf{GraphGPS} & \textbf{SAN} & \textbf{Graphormer} \\
+\midrule
+No-PE & native, ran & native, ran & native, ran (2 ds) \\
+LapPE & native, ran & native, ran & adapted, ran (2 ds) \\
+RWSE & native, ran & adapted, ran & adapted, ran (2 ds) \\
+SignNet & native, ran & adapted, ran & adapted, ran (2 ds) \\
+GRPE & adapted, \textbf{not run} & adapted, ran (partial) & native, ran (2 ds) \\
+\bottomrule
+\end{tabular}
+\caption{PE $\times$ backbone fit and what trained. ``2 ds'' = Peptides only, no PascalVOC-SP.}
+\label{tab:pefit}
+\end{table}
+
+\subsection{Long-Range Sensitivity Metric}
+Following Di Giovanni et al.\ (2023), we take the true Frobenius norm of the Jacobian block $\partial h_v^{(L)}/\partial x_u^{(0)}$ for sampled target nodes $v$ against every source $u$, restricted to shared original node-feature channels (never PE channels, so PEs are not rewarded merely for adding input dims). Bucketing by hop distance gives $\bar s(d)$. Raw $\bar s(d)$ conflates decay \emph{shape} with an overall \emph{gain} (init scale, norm placement, depth, width) that is not comparable across backbones, so we rank on
+\[
+\rho = \frac{\sum_{d \ge d_{\min}} \bar s(d)}{\sum_{d \ge 1} \bar s(d)},
+\]
+a ratio of sums in which gain cancels exactly, over an absolute window per dataset (primary \emph{within} a dataset) and a relative window $d/\mathrm{diam}(G) > 0.5$ shared across datasets (primary \emph{across} datasets; the axis \S5 ranks on, hence $\rho_{\text{rel}}$\footnote{Abbreviations used throughout: APE/RPE = absolute/relative positional encoding (\S1); GRPE = the specific attention-bias PE of Park et al.\ (2022) (\S3.1); $\rho$/$\rho_{\text{rel}}$ = the absolute/relative-window long-range mass fraction defined here; $W$ = Kendall's coefficient of concordance (\S5.2).}). Unlike attention-entropy (how uniformly attention is spread, not whether it reaches distant nodes) or effective-resistance-based measures (graph-topological and backbone-independent by construction), $\rho$ is read off the trained model's own Jacobian, so it is sensitive to what the model actually learned to use, not just what the graph's structure allows -- and, being a ratio of sums, isolates decay shape from gain in the same step. CIs are graph-clustered bootstraps (1000 resamples), keeping a graph's seed-copies together. Budget: 256 test graphs/dataset, $T$ target nodes calibrated per (backbone, dataset), up to 128 pairs/bucket.
+
+\section{Experimental Setup}
+\begin{table}[h]
+\centering\small
+\begin{tabular}{lccc}
+\toprule
+\textbf{Dataset} & \textbf{\#Graphs} & \textbf{Avg.\ n/diam.} & \textbf{Metric} \\
+\midrule
+Peptides-func & 15,535 & 150.9 / 57.0 & AP $\uparrow$ \\
+Peptides-struct & 15,535 & 150.9 / 57.0 & MAE $\downarrow$ \\
+PascalVOC-SP & 11,355 & 479.4 / $\sim$20--28 & macro-F1 $\uparrow$ \\
+\bottomrule
+\end{tabular}
+\caption{Dataset statistics (LRGB; Dwivedi et al., 2022).}
+\label{tab:data}
+\end{table}
+All three are LRGB datasets, same splits/protocol, only graph regime and task change. Peptides-func/-struct share graphs, differing only in task, isolating task-generalization; PascalVOC-SP has a different degree/diameter distribution and a node-level task, isolating graph-regime generalization. COCO-SP is excluded (SAN fails to converge on it per LRGB, the same $O(n^2)$-on-large-graphs issue costing us Graphormer's PascalVOC-SP arm).
+
+GraphGPS's 36 runnable cells (4 PEs $\times$ 3 datasets), Graphormer's 30 (5 PEs $\times$ 2 datasets), and SAN's 45 (5 PEs $\times$ 3 datasets) all trained 3 seeds. All models use AdamW with cosine schedule/warmup, each backbone at its own tuned parameter budget ($\approx$500K for GraphGPS; $\sim$0.8--0.9M for SAN on Peptides). For each cell we report the native test metric (mean$\pm$std over seeds), $\rho$ with a graph-clustered bootstrap CI (seeds pooled, not averaged), and parameter count. All \S5 numbers come from \texttt{scripts/\allowbreak collect\_cross\_backbone\_results.py} (pulls every branch's \texttt{results/*.json} without checking branches out) then \texttt{scripts/\allowbreak aggregate\_results.py} and \texttt{scripts/\allowbreak make\_paper\_tables.py}, run once over all three branches.
+
+\section{Results}
+\subsection{Task Performance and Long-Range Sensitivity}
+Table~\ref{tab:results} reports every completed cell. A star marks a $\rho_{\text{rel}}$ both CI-disjoint from that row's No-PE \emph{and} exceeding the larger of the two cells' seed-to-seed sd -- our own analysis's two-part rule, since on several PascalVOC-SP cells the CI alone is not the binding uncertainty (\S6).
+
+\input{results_tables}
+\input{results_rho}
+
+\textbf{GraphGPS.} On Peptides-struct all three available PEs push $\rho_{\text{rel}}$ significantly below No-PE while cutting MAE 24--33\%; on Peptides-func nothing separates; on PascalVOC-SP every PE hurts F1 and nothing separates on sensitivity. Pattern: PE helps the task a lot $\Rightarrow$ measurably more local; helps a little or hurts $\Rightarrow$ no measurable change -- opposite the naive "PEs extend reach" hypothesis.
+
+\textbf{Graphormer.} All five PEs sit in a narrow $\rho_{\text{rel}}$ band on both Peptides sets (0.54--0.56 func, 0.58--0.58 struct); none CI-disjoint from No-PE. Task metric also moves less than GraphGPS's (3\% MAE spread on struct vs.\ 24\%). Not run on PascalVOC-SP.
+
+\textbf{SAN.} PascalVOC-SP is degenerate ($\rho_{\text{rel}}{=}0$ exactly, all PEs, zero seed variance) -- an artifact of sparse edge-only attention (8-hop receptive field against a window starting at $d{=}14$), not a null result. On Peptides, LapPE and GRPE collapse to near-zero $\rho_{\text{rel}}$ on \emph{both} datasets (0.007--0.03) -- both integrate into SAN's own attention machinery (LapPE via its native learned-PE module, GRPE as an attention-bias addition) rather than arriving as a plain input feature. RWSE is the consistent mirror case: elevated on both (0.195 func, 0.306 struct -- on struct even above No-PE's 0.232). SignNet-PE breaks that pattern: it groups with RWSE on Peptides-func (0.183) but collapses with LapPE/GRPE on Peptides-struct (0.024), despite entering SAN identically -- a concatenated feature -- on both. So encoding mechanism alone does not explain the split; SignNet-PE's own inconsistency across two datasets built from the same graphs rules that out, leaving only LapPE/GRPE's collapse and RWSE's elevation as the robust two-thirds of the pattern.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.95\textwidth]{figures/sensitivity_norm_combined.png}
+\caption{Normalized curves $\tilde s(d)=\bar s(d)/\bar s(1)$, one line per (backbone, PE), log-$y$: a gain difference is a vertical shift, decay shape is slope. Left to right: Peptides-func, Peptides-struct, PascalVOC-SP. Compare SAN's (red) curves between the two Peptides panels: LapPE/GRPE collapse toward the bottom in both, but SignNet-PE collapses with them only on Peptides-struct -- on Peptides-func it instead sits with RWSE near the top. That within-SAN inconsistency, not a clean two-group split, is what \S5.1 discusses.}
+\label{fig:curves}
+\end{figure*}
+
+\subsection{Sensitivity--Performance Correlation and Cross-Backbone Agreement}
+Table~\ref{tab:critb} gives the Spearman correlation between $\rho_{\text{rel}}$ and task metric (MAE flipped so positive $r$ = "more local $\Rightarrow$ better task"), per backbone (descriptive, $n\le5$) and pooled per dataset (confirmatory).
+
+\input{results_critb}
+
+The pooled correlation is significant on PascalVOC-SP ($r{=}0.84$, $p{=}0.005$, driven by SAN, since Graphormer has no VOC cells) and marginal on Peptides-struct ($r{=}0.53$, $p{=}0.051$), but per-backbone signs disagree: GraphGPS is strongly negative on both Peptides sets ($r{=}{-1.00}$, $-0.80$), Graphormer is essentially perfectly \emph{positive} on struct ($r{=}1.00$, $p{<}10^{-23}$) and negative on func ($r{=}{-0.60}$); SAN agrees with GraphGPS's sign on both ($r{=}{-0.90}$, $-0.80$).
+
+This needs a qualification separate from correlation \emph{sign}: do backbones even agree on the sensitivity \emph{ranking} of PEs? Kendall's $W$ (coefficient of concordance) over the PE set common to all non-degenerate backbones per dataset gives $W{=}0.82$ ($p{=}0.060$, $n{=}3$ backbones) on Peptides-struct -- GraphGPS, SAN and Graphormer all rank SignNet-PE/LapPE more local than RWSE/No-PE once GRPE (absent from GraphGPS) is dropped -- and $W{=}0.56$ ($p{=}0.17$) on Peptides-func. PascalVOC-SP is untestable: SAN's ranking there is an all-way tie, leaving only one non-degenerate backbone. So backbones largely \emph{agree} on which PE is more local on Peptides-struct, yet disagree on the \emph{sign} of what that locality means for task performance -- a sharper instability than a scrambled ranking would be.
+
+No best-PE-per-cell transfers across backbones or datasets either: LapPE is GraphGPS's best PE on Peptides-struct (MAE 0.251) yet SAN's second-worst there (MAE 0.296, ahead of only No-PE) on the identical graphs; GraphGPS and SAN agree no PE helps sensitivity on PascalVOC-SP but disagree completely on whether PEs help the task (every PE hurts GraphGPS's F1, every PE helps SAN's). PE effects on sensitivity and on task performance are both backbone-conditional -- exactly what a single-backbone study cannot rule out. Table~\ref{tab:headline} distills this into the one artifact meant to carry the claim on its own: rank-agreement is high where it matters (Peptides-struct) and the correlation sign still splits 2-1 against it.
+
+\input{results_headline}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.95\textwidth]{figures/ranking_heatmap_combined.png}
+\caption{Rank of $\rho_{\text{rel}}$ within each backbone's own PEs (1=most local; value below rank; blank=never ran). Peptides-func, Peptides-struct, PascalVOC-SP, left to right.}
+\label{fig:ranking}
+\end{figure*}
+
+\subsection{Paired Bootstrap on Peptides-func}
+Table~\ref{tab:results}'s CIs are marginal (arm vs.\ arm separately); pairing each PE against its own No-PE arm \emph{by graph identity} and bootstrapping the difference cancels shared between-graph variance -- flagged as the most promising unresolved analysis in our prior work (\texttt{docs/findings\_gps.txt} \S9). It resolves GraphGPS's Peptides-func null: LapPE shows a significant negative paired effect ($\Delta\rho_{\text{rel}}{=}{-}0.0072$, CI $[-0.0107,-0.0037]$) and SignNet-PE a significant positive one ($+0.0146$, CI $[0.0102,0.0189]$) -- small but real, and opposite in sign despite both improving AP. The same method must \emph{not} be over-read on PascalVOC-SP: it resamples graphs but not seeds, and GraphGPS's VOC arm is exactly where prior analysis found between-seed variance dominant, so its "significant" LapPE/RWSE paired effects there ($+0.0077$, $+0.0044$) likely repeat that same false-positive rather than confirm a new one (full numbers in \texttt{results\_all/paired\_bootstrap.csv}).
+
+\section{Discussion}
+GraphGPS's Peptides-struct result -- task-improving PEs pull sensitivity mass toward the near half, not the far half -- reappears in direction on SAN despite SAN's near-total collapse under three of five PEs, suggesting it is not specific to GraphGPS's GatedGCN+Transformer hybrid. It reverses under Graphormer, but Graphormer's own $\rho_{\text{rel}}$ range there (0.577--0.585) is narrow enough that its positive correlation is a rank correlation over a compressed range, not obviously "PEs work oppositely."
+
+SAN's LapPE/GRPE collapse and RWSE elevation are consistent across both Peptides datasets (built from identical graphs), which has no counterpart in GraphGPS and is not predicted by the equi-expressivity results we build on (Black et al., 2024) -- expressivity says nothing about which mechanism a gradient prefers. SignNet-PE is not consistent, though: it groups with RWSE on Peptides-func and with the collapsed pair on Peptides-struct despite entering SAN identically (a concatenated feature) both times. That is a real answer, not an underpowered one -- with all of SAN's Peptides cells now at 3 of 3 seeds, the inconsistency is in the data, and it rules out ``encoding mechanism alone'' as a sufficient explanation for the split rather than merely leaving it unconfirmed. GraphGPS's GRPE cell never training still removes the one three-way native-vs-adapted GRPE comparison we planned; the two-way comparison available (Graphormer native vs.\ SAN adapted) is at least consistent with GRPE not stabilizing across backbones, though two backbones cannot generalize.
+
+\section{Limitations}
+\begin{itemize}[leftmargin=1.1em, itemsep=0pt, topsep=1pt]
+\item \textbf{GraphGPS+GRPE never trained} (attention-bias hook designed, not wired); GraphGPS has 4 PE arms, not 5, throughout.
+\item \textbf{Graphormer's PascalVOC-SP arm never trained} ($O(n^2)$ attention, compute budget); no 3-backbone comparison exists there.
+\item \textbf{SAN's PascalVOC-SP arm is degenerate, not null}: sparse attention (\texttt{GT\_layers=8}, \texttt{full\_graph=False}) gives an 8-hop receptive field against a window starting at $d{=}14$, so $\rho_{\text{rel}}{=}0$ by construction; its task-metric numbers are real, its sensitivity numbers are not.
+\item \textbf{Training budgets follow each backbone's own reference recipe} (unequalized epoch counts), a difference along the axis \S5.2 compares.
+\item \textbf{Jacobian content width differs by backbone at fixed hidden width}: GraphGPS shrinks its atom encoder per-PE (96/80/76/64 channels), SAN/Graphormer probe the full hidden width -- a raw-magnitude confound, which is why $\rho$ rather than raw $\bar s(d)$ is ranked.
+\item \textbf{The paired bootstrap (\S5.3) resamples graphs, not seeds}, so it can repeat a seed-variance false-positive on cells where that dominates (GraphGPS PascalVOC-SP specifically); only its Peptides-func result is read as confirmed.
+\item The sensitivity metric is a first-order, input-gradient measure -- a lower bound on long-range capacity, not a full characterization.
+\end{itemize}
+
+\section{Conclusion}
+This report extended a single-backbone, single-dataset PE-sensitivity study into a partial 3-backbone $\times$ 5-PE $\times$ 3-dataset grid (37/45 cells, all 3 seeds), testing whether a PE ranking from one backbone/dataset generalizes. It does not, but not by scrambling: backbones largely \emph{agree} which PE is more local on Peptides-struct ($W{=}0.82$) while \emph{disagreeing in sign} on what that locality means for task performance (GraphGPS/SAN negative, Graphormer positive), and within SAN itself, SignNet-PE's inconsistency across two datasets built from the same graphs rules out encoding mechanism as a sufficient explanation for its own LapPE/GRPE-vs-RWSE split. The pooled sensitivity--performance correlation is significant on PascalVOC-SP and marginal on Peptides-struct but is assembled from backbones that individually disagree in sign, so it should not be read as backbone-general. The repository (\texttt{scripts/\allowbreak collect\_cross\_backbone\_results.py}, \texttt{aggregate\_results.py}, \texttt{make\_paper\_tables.py}, \texttt{paired\_bootstrap.py}, \texttt{make\_ranking\_figures.py}) reproduces every number here from the three backbone branches; the two missing arms (GraphGPS+GRPE, Graphormer+PascalVOC-SP) are the concrete next step before these cross-backbone claims can be stated without the caveats in \S6.
+
+\begin{thebibliography}{99}
+\small
+\bibitem[Alon and Yahav, 2021]{alon2021} U. Alon and E. Yahav. On the bottleneck of graph neural networks and its practical implications. \emph{ICLR}, 2021.
+\bibitem[Bechler-Speicher et al., 2025]{bs2025} M. Bechler-Speicher et al. Position: Graph Learning Will Lose Relevance Due To Poor Benchmarks. \emph{arXiv:2502.14546}, 2025.
+\bibitem[Black et al., 2024]{black2024} M. Black et al. Comparing graph transformers via positional encodings. \emph{ICML}, 2024. arXiv:2402.14202.
+\bibitem[Di Giovanni et al., 2023]{digiovanni2023} F. Di Giovanni et al. On over-squashing in message passing neural networks. \emph{ICML}, 2023.
+\bibitem[Dwivedi and Bresson, 2020]{dwivedi2020} V. P. Dwivedi and X. Bresson. A generalization of transformer networks to graphs. \emph{arXiv:2012.09699}, 2020.
+\bibitem[Dwivedi et al., 2022]{dwivedi2022} V. P. Dwivedi et al. Long range graph benchmark. \emph{NeurIPS Datasets \& Benchmarks}, 2022. arXiv:2206.08164.
+\bibitem[Errica et al., 2020]{errica2020} F. Errica, M. Podda, D. Bacciu, A. Micheli. A fair comparison of graph neural networks for graph classification. \emph{ICLR}, 2020.
+\bibitem[Kreuzer et al., 2021]{kreuzer2021} D. Kreuzer, D. Beaini, W. L. Hamilton, V. L\'etourneau, P. Tossou. Rethinking graph transformers with spectral attention. \emph{NeurIPS}, 2021. arXiv:2106.03893.
+\bibitem[Lim et al., 2023]{lim2023} D. Lim et al. Sign and basis invariant networks for spectral graph representation learning. \emph{ICLR}, 2023. arXiv:2202.13013.
+\bibitem[Park et al., 2022]{park2022} W. Park, W.-G. Chang, D. Lee, J. Kim, et al. GRPE: Relative positional encoding for graph transformer. \emph{ICLR MLDD Workshop}, 2022. arXiv:2201.12787.
+\bibitem[Rampasek et al., 2022]{rampasek2022} L. Rampasek et al. Recipe for a general, powerful, scalable graph transformer. \emph{NeurIPS}, 2022.
+\bibitem[Ying et al., 2021]{ying2021} C. Ying et al. Do transformers really perform bad for graph representation? \emph{NeurIPS}, 2021. arXiv:2106.05234.
+\end{thebibliography}
+
+\end{document}
