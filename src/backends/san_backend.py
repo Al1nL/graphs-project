@@ -1857,7 +1857,7 @@ def _build_loaders(run_cfg, net_params, train_params):
                                       num_workers=4, pin_memory=True, persistent_workers=True))
         else:
             shuffle = split == "train"
-            bs = train_params["batch_size"] if split == "train" else 16
+            bs = train_params["batch_size"] if split == "train" else 4
             loaders.append(DataLoader(ds, batch_size=bs, shuffle=shuffle,
                                       collate_fn=collate, num_workers=4, pin_memory=True,
                                       persistent_workers=(split == "train")))
