@@ -46,7 +46,7 @@ PascalVOC-SP & SAN & 0.146 & 0.174 & 0.126 & 0.154 & 0.168 \\
 \midrule
 Peptides-func & GraphGPS & 0.5060 & 0.4970 & 0.5032 & 0.5185$^{*}$ & -- \\
 Peptides-func & Graphormer & 0.5506 & 0.5501 & 0.5487 & 0.5602 & 0.5387 \\
-Peptides-func & SAN & 0.1643 & 0.0289 & 0.1946 & 0.1827 & 0.0126$^{*}$ \\
+Peptides-func & SAN & 0.1643 & 0.0289$^{*}$ & 0.1946 & 0.1827 & 0.0126$^{*}$ \\
 Peptides-struct & GraphGPS & 0.5258 & 0.4650$^{*}$ & 0.4830$^{*}$ & 0.4584$^{*}$ & -- \\
 Peptides-struct & Graphormer & 0.5823 & 0.5798 & 0.5846 & 0.5772 & 0.5807 \\
 Peptides-struct & SAN & 0.2321 & 0.0202$^{*}$ & 0.3061 & 0.0237$^{*}$ & 0.0065$^{*}$ \\
@@ -69,23 +69,23 @@ PascalVOC-SP & SAN & 0.0000 & 0.0000 & 0.0000 & 0.0000 & 0.0000 \\
 \toprule
 \textbf{Dataset} & \textbf{Backbone} & \textbf{$n$} & \textbf{Spearman $r$} & \textbf{$p$} \\
 \midrule
-Peptides-func & GraphGPS & 4 & -1.00 & 0 \\
-Peptides-func & Graphormer & 5 & -0.60 & 0.285 \\
-Peptides-func & SAN & 5 & -0.90 & 0.0374 \\
-Peptides-func & ALL (pooled) & 14 & \textbf{0.41} & 0.149 \\
+Peptides-func & GraphGPS & 4 & -1.00 & 0.0833 \\
+Peptides-func & Graphormer & 5 & -0.60 & 0.35 \\
+Peptides-func & SAN & 5 & -0.90 & 0.0833 \\
+Peptides-func & ALL (pooled) & 14 & \textbf{0.41} & 0.149$^{\dagger}$ \\
 \addlinespace
-Peptides-struct & GraphGPS & 4 & -0.80 & 0.2 \\
-Peptides-struct & Graphormer & 5 & 1.00 & 1.4e-24 \\
-Peptides-struct & SAN & 5 & -0.80 & 0.104 \\
-Peptides-struct & ALL (pooled) & 14 & \textbf{0.53} & 0.0514 \\
+Peptides-struct & GraphGPS & 4 & -0.80 & 0.333 \\
+Peptides-struct & Graphormer & 5 & 1.00 & 0.0167 \\
+Peptides-struct & SAN & 5 & -0.80 & 0.133 \\
+Peptides-struct & ALL (pooled) & 14 & \textbf{0.53} & 0.0514$^{\dagger}$ \\
 \addlinespace
-PascalVOC-SP & GraphGPS & 4 & 0.20 & 0.8 \\
-PascalVOC-SP & SAN & 5 & -- & -- \\
-PascalVOC-SP & ALL (pooled) & 9 & \textbf{0.84} & 0.00461 \\
+PascalVOC-SP & GraphGPS & 4 & 0.20 & 0.917 \\
+PascalVOC-SP & SAN & 5 & -- & undef. \\
+PascalVOC-SP & ALL (pooled) & 9 & \textbf{0.84} & 0.00926 \\
 \addlinespace
 \bottomrule
 \end{tabular}
-\caption{Criterion (b): Spearman rank correlation between $\rho_{\text{rel}}$ and the task metric (MAE sign-flipped so higher $r$ means ``more local $\Rightarrow$ better task''), across each backbone's PE arms, and pooled across all (backbone, PE) arms per dataset. Sign and magnitude both differ by backbone.}
+\caption{Criterion (b): Spearman rank correlation between $\rho_{\text{rel}}$ and the task metric. MAE is sign-flipped so a higher task-metric value always means better task performance; $\rho_{\text{rel}}$ itself is not sign-flipped, so a \emph{negative} $r$ is the ``more local $\Rightarrow$ better task'' case, not a positive one. $p$ is an exact permutation $p$-value, enumerating all $n!$ rank permutations, except the two $n{=}14$ pooled rows marked $^{\dagger}$, which fall back to the asymptotic approximation since $n!$ is too large to enumerate there. SAN's PascalVOC-SP row is ``undef.'': $\rho_{\text{rel}}=0$ identically for every PE there, so the correlation itself is not defined, not merely untested. Sign and magnitude both differ by backbone.}
 \label{tab:critb}
 \end{table}
 
@@ -101,8 +101,8 @@ PascalVOC-SP & ALL (pooled) & 9 & \textbf{0.84} & 0.00461 \\
 \toprule
 \textbf{Dataset} & \textbf{Backbones (PE set)} & \textbf{Kendall's $W$} & \textbf{$p$} \\
 \midrule
-Peptides-func & GraphGPS, SAN, Graphormer (4 PEs) & 0.56 & 0.172 \\
-Peptides-struct & GraphGPS, SAN, Graphormer (4 PEs) & 0.82 & 0.0602 \\
+Peptides-func & GraphGPS, SAN, Graphormer (4 PEs) & 0.56 & 0.207 \\
+Peptides-struct & GraphGPS, SAN, Graphormer (4 PEs) & 0.82 & 0.033 \\
 PascalVOC-SP & fewer than 2 backbones with a non-degenerate ranking & -- & -- \\
 \bottomrule
 \end{tabular}
@@ -174,11 +174,11 @@ PascalVOC-SP & SAN & SignNet-PE & 634 & 0.0000 [0.0000, 0.0000] & -- \\
 \textbf{Dataset} & \textbf{Backbone} & \textbf{Rank-agr.\ ($W$)} & \textbf{Corr.\ sign} \\
 \midrule
 Peptides-func & GraphGPS & 0.56 & $-$ (-1.00) \\
-Peptides-func & Graphormer & 0.56 & $-$ (-0.60) \\
+Peptides-func & Graphormer & 0.56 & $-$ (-0.60)$^{\ddagger}$ \\
 Peptides-func & SAN & 0.56 & $-$ (-0.90) \\
 \addlinespace[1pt]
 Peptides-struct & GraphGPS & 0.82 & $-$ (-0.80) \\
-Peptides-struct & Graphormer & 0.82 & $+$ (1.00) \\
+Peptides-struct & Graphormer & 0.82 & $+$ (1.00)$^{\ddagger}$ \\
 Peptides-struct & SAN & 0.82 & $-$ (-0.80) \\
 \addlinespace[1pt]
 PascalVOC-SP & GraphGPS & n/a & $+$ (0.20) \\
@@ -187,6 +187,6 @@ PascalVOC-SP & SAN & n/a & n/a (degenerate) \\
 \addlinespace[1pt]
 \bottomrule
 \end{tabular}
-\caption{Headline claim, distilled. \textbf{Rank-agr.\ ($W$)}: Kendall's coefficient of concordance between backbones' $\rho_{\text{rel}}$ rankings of PEs on that dataset (\S5.2) -- a property of the dataset, identical across its backbone rows here. \textbf{Corr.\ sign}: sign of that backbone's own Spearman $r$ between $\rho_{\text{rel}}$ and task metric (Table~\ref{tab:critb}) -- a property of the backbone. High $W$ with disagreeing signs (Peptides-struct) is the paper's central finding: backbones agree which PE is more local, not on what that locality means for the task.}
+\caption{Headline claim, distilled. \textbf{Rank-agr.\ ($W$)}: Kendall's coefficient of concordance between backbones' $\rho_{\text{rel}}$ rankings of PEs on that dataset (\S5.2) -- a property of the dataset, identical across its backbone rows here. \textbf{Corr.\ sign}: sign of that backbone's own Spearman $r$ between $\rho_{\text{rel}}$ and task metric (Table~\ref{tab:critb}); \emph{negative} is the ``more local $\Rightarrow$ better task'' case (Table~\ref{tab:critb}'s caption has the full sign convention). High $W$ with disagreeing signs (Peptides-struct) is the paper's central finding: backbones agree which PE is more local, not on what that locality means for the task. $^{\ddagger}$ Graphormer's probe used 10 test graphs/seed against 256 for GraphGPS/SAN (\S4); its rank and sign here should be read as \emph{not measured precisely enough to trust at face value} rather than as a confirmed data point (\S6).}
 \label{tab:headline}
 \end{table}

@@ -9,22 +9,22 @@
 \toprule
 \textbf{Dataset} & \textbf{Backbone} & \textbf{$n$} & \textbf{Spearman $r$} & \textbf{$p$} \\
 \midrule
-Peptides-func & GraphGPS & 4 & -1.00 & 0 \\
-Peptides-func & Graphormer & 5 & -0.60 & 0.285 \\
-Peptides-func & SAN & 5 & -0.90 & 0.0374 \\
-Peptides-func & ALL (pooled) & 14 & \textbf{0.41} & 0.149 \\
+Peptides-func & GraphGPS & 4 & -1.00 & 0.0833 \\
+Peptides-func & Graphormer & 5 & -0.60 & 0.35 \\
+Peptides-func & SAN & 5 & -0.90 & 0.0833 \\
+Peptides-func & ALL (pooled) & 14 & \textbf{0.41} & 0.149$^{\dagger}$ \\
 \addlinespace
-Peptides-struct & GraphGPS & 4 & -0.80 & 0.2 \\
-Peptides-struct & Graphormer & 5 & 1.00 & 1.4e-24 \\
-Peptides-struct & SAN & 5 & -0.80 & 0.104 \\
-Peptides-struct & ALL (pooled) & 14 & \textbf{0.53} & 0.0514 \\
+Peptides-struct & GraphGPS & 4 & -0.80 & 0.333 \\
+Peptides-struct & Graphormer & 5 & 1.00 & 0.0167 \\
+Peptides-struct & SAN & 5 & -0.80 & 0.133 \\
+Peptides-struct & ALL (pooled) & 14 & \textbf{0.53} & 0.0514$^{\dagger}$ \\
 \addlinespace
-PascalVOC-SP & GraphGPS & 4 & 0.20 & 0.8 \\
-PascalVOC-SP & SAN & 5 & -- & -- \\
-PascalVOC-SP & ALL (pooled) & 9 & \textbf{0.84} & 0.00461 \\
+PascalVOC-SP & GraphGPS & 4 & 0.20 & 0.917 \\
+PascalVOC-SP & SAN & 5 & -- & undef. \\
+PascalVOC-SP & ALL (pooled) & 9 & \textbf{0.84} & 0.00926 \\
 \addlinespace
 \bottomrule
 \end{tabular}
-\caption{Criterion (b): Spearman rank correlation between $\rho_{\text{rel}}$ and the task metric (MAE sign-flipped so higher $r$ means ``more local $\Rightarrow$ better task''), across each backbone's PE arms, and pooled across all (backbone, PE) arms per dataset. Sign and magnitude both differ by backbone.}
+\caption{Criterion (b): Spearman rank correlation between $\rho_{\text{rel}}$ and the task metric. MAE is sign-flipped so a higher task-metric value always means better task performance; $\rho_{\text{rel}}$ itself is not sign-flipped, so a \emph{negative} $r$ is the ``more local $\Rightarrow$ better task'' case, not a positive one. $p$ is an exact permutation $p$-value, enumerating all $n!$ rank permutations, except the two $n{=}14$ pooled rows marked $^{\dagger}$, which fall back to the asymptotic approximation since $n!$ is too large to enumerate there. SAN's PascalVOC-SP row is ``undef.'': $\rho_{\text{rel}}=0$ identically for every PE there, so the correlation itself is not defined, not merely untested. Sign and magnitude both differ by backbone.}
 \label{tab:critb}
 \end{table}

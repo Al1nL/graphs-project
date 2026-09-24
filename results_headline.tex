@@ -10,11 +10,11 @@
 \textbf{Dataset} & \textbf{Backbone} & \textbf{Rank-agr.\ ($W$)} & \textbf{Corr.\ sign} \\
 \midrule
 Peptides-func & GraphGPS & 0.56 & $-$ (-1.00) \\
-Peptides-func & Graphormer & 0.56 & $-$ (-0.60) \\
+Peptides-func & Graphormer & 0.56 & $-$ (-0.60)$^{\ddagger}$ \\
 Peptides-func & SAN & 0.56 & $-$ (-0.90) \\
 \addlinespace[1pt]
 Peptides-struct & GraphGPS & 0.82 & $-$ (-0.80) \\
-Peptides-struct & Graphormer & 0.82 & $+$ (1.00) \\
+Peptides-struct & Graphormer & 0.82 & $+$ (1.00)$^{\ddagger}$ \\
 Peptides-struct & SAN & 0.82 & $-$ (-0.80) \\
 \addlinespace[1pt]
 PascalVOC-SP & GraphGPS & n/a & $+$ (0.20) \\
@@ -23,6 +23,6 @@ PascalVOC-SP & SAN & n/a & n/a (degenerate) \\
 \addlinespace[1pt]
 \bottomrule
 \end{tabular}
-\caption{Headline claim, distilled. \textbf{Rank-agr.\ ($W$)}: Kendall's coefficient of concordance between backbones' $\rho_{\text{rel}}$ rankings of PEs on that dataset (\S5.2) -- a property of the dataset, identical across its backbone rows here. \textbf{Corr.\ sign}: sign of that backbone's own Spearman $r$ between $\rho_{\text{rel}}$ and task metric (Table~\ref{tab:critb}) -- a property of the backbone. High $W$ with disagreeing signs (Peptides-struct) is the paper's central finding: backbones agree which PE is more local, not on what that locality means for the task.}
+\caption{Headline claim, distilled. \textbf{Rank-agr.\ ($W$)}: Kendall's coefficient of concordance between backbones' $\rho_{\text{rel}}$ rankings of PEs on that dataset (\S5.2) -- a property of the dataset, identical across its backbone rows here. \textbf{Corr.\ sign}: sign of that backbone's own Spearman $r$ between $\rho_{\text{rel}}$ and task metric (Table~\ref{tab:critb}); \emph{negative} is the ``more local $\Rightarrow$ better task'' case (Table~\ref{tab:critb}'s caption has the full sign convention). High $W$ with disagreeing signs (Peptides-struct) is the paper's central finding: backbones agree which PE is more local, not on what that locality means for the task. $^{\ddagger}$ Graphormer's probe used 10 test graphs/seed against 256 for GraphGPS/SAN (\S4); its rank and sign here should be read as \emph{not measured precisely enough to trust at face value} rather than as a confirmed data point (\S6).}
 \label{tab:headline}
 \end{table}

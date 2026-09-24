@@ -54,12 +54,21 @@ def fmt(x, nd=4):
 
 def significant(row, none_row):
     """CI-disjoint-from-none AND seed_std doesn't dominate the gap -- the exact rule
-    findings_gps.txt Sec. 8 insists on: never call an effect from the CI alone."""
+    findings_gps.txt Sec. 8 insists on: never call an effect from the CI alone.
+
+    BUG FIXED (external review, Sep 2026): this used to read `rho_seed_std`, which
+    aggregate_results.py computes for the ABSOLUTE-window rho statistic, not for
+    rho_rel -- the two are different numbers and the absolute one is the wrong
+    noise floor for a rho_rel significance test. `rho_rel_seed_std` (added to
+    aggregate_results.py alongside this fix) is rho_rel's own seed-to-seed spread.
+    Recomputing with the correct field flips exactly one cell from the previously
+    published table: SAN/Peptides-func/LapPE gains a star (its correct floor is
+    0.116, not the 0.135 the old absolute-rho field gave)."""
     if none_row is None or pd.isna(row.rho_rel_ci_lo) or pd.isna(none_row.rho_rel_ci_lo):
         return False
     disjoint = (row.rho_rel_ci_lo > none_row.rho_rel_ci_hi) or (row.rho_rel_ci_hi < none_row.rho_rel_ci_lo)
     gap = abs(row.rho_rel - none_row.rho_rel)
-    seed_noise = max(row.get("rho_seed_std", 0) or 0, none_row.get("rho_seed_std", 0) or 0)
+    seed_noise = max(row.get("rho_rel_seed_std", 0) or 0, none_row.get("rho_rel_seed_std", 0) or 0)
     return bool(disjoint and gap > seed_noise)
 
 
@@ -193,7 +202,18 @@ def build_criterion_b(in_dir):
                      else BACKBONE_LABEL.get(row.backbone, row.backbone))
             bold = (r"\textbf{%s}" if row.backbone == "ALL (pooled)" else "%s")
             r_str = fmt(row.spearman_r, 2)
-            p_str = "--" if pd.isna(row.p) else (f"{row.p:.3g}")
+            if pd.isna(row.p):
+                p_str = "undef."
+            else:
+                # exact permutation p (n<=9, see aggregate_results.py) vs the
+                # asymptotic t-approximation (n=14 pooled rows only) -- the
+                # asymptotic one is flagged with a dagger since it was found
+                # to report impossible values (below the exact floor of
+                # 2/n!) when misapplied at n=4-5 in an earlier draft; the n=14
+                # pooled rows here were never below that floor, but the
+                # distinction is marked throughout for transparency.
+                exact = bool(row.get("p_exact", False))
+                p_str = f"{row.p:.3g}" + ("" if exact else r"$^{\dagger}$")
             lines.append(f"{DATASET_LABEL[ds]} & {label} & {int(row.n_pes)} & "
                          f"{bold % r_str} & {p_str} \\\\")
         lines.append(r"\addlinespace")
@@ -201,9 +221,15 @@ def build_criterion_b(in_dir):
     lines.append(r"\end{tabular}")
     lines.append(
         r"\caption{Criterion (b): Spearman rank correlation between $\rho_{\text{rel}}$ and "
-        r"the task metric (MAE sign-flipped so higher $r$ means ``more local $\Rightarrow$ "
-        r"better task''), across each backbone's PE arms, and pooled across all "
-        r"(backbone, PE) arms per dataset. Sign and magnitude both differ by backbone.}"
+        r"the task metric. MAE is sign-flipped so a higher task-metric value always means "
+        r"better task performance; $\rho_{\text{rel}}$ itself is not sign-flipped, so a "
+        r"\emph{negative} $r$ is the ``more local $\Rightarrow$ better task'' case, not a "
+        r"positive one. $p$ is an exact permutation $p$-value, enumerating all $n!$ rank "
+        r"permutations, except the two $n{=}14$ pooled rows marked $^{\dagger}$, which fall "
+        r"back to the asymptotic approximation since $n!$ is too large to enumerate there. "
+        r"SAN's PascalVOC-SP row is ``undef.'': $\rho_{\text{rel}}=0$ identically for every "
+        r"PE there, so the correlation itself is not defined, not merely untested. Sign and "
+        r"magnitude both differ by backbone.}"
     )
     lines.append(r"\label{tab:critb}")
     lines.append(r"\end{table}")
@@ -275,7 +301,13 @@ def build_headline_summary(in_dir):
             elif pd.isna(r):
                 sign_str = "n/a (degenerate)"
             else:
-                sign_str = f"${'+' if r > 0 else ('-' if r < 0 else '0')}$ ({r:.2f})"
+                # Graphormer's probe used 10 test graphs/seed, not the 256 the
+                # other two backbones used (\S4/Limitations) -- its own CI/seed
+                # sd are several times wider than its whole PE-to-PE spread, so
+                # flag every Graphormer row here rather than let it look as
+                # trustworthy as a GraphGPS/SAN row built from 25x more data.
+                caveat = r"$^{\ddagger}$" if backbone == "graphormer" else ""
+                sign_str = f"${'+' if r > 0 else ('-' if r < 0 else '0')}$ ({r:.2f}){caveat}"
             lines.append(f"{DATASET_LABEL[ds]} & {BACKBONE_LABEL[backbone]} & {w_str} & {sign_str} \\\\")
         lines.append(r"\addlinespace[1pt]")
     lines.append(r"\bottomrule")
@@ -286,9 +318,14 @@ def build_headline_summary(in_dir):
         r"PEs on that dataset (\S5.2) -- a property of the dataset, "
         r"identical across its backbone rows here. \textbf{Corr.\ sign}: sign of that "
         r"backbone's own Spearman $r$ between $\rho_{\text{rel}}$ and task metric "
-        r"(Table~\ref{tab:critb}) -- a property of the backbone. High $W$ with disagreeing "
-        r"signs (Peptides-struct) is the paper's central finding: backbones agree which "
-        r"PE is more local, not on what that locality means for the task.}"
+        r"(Table~\ref{tab:critb}); \emph{negative} is the ``more local $\Rightarrow$ better "
+        r"task'' case (Table~\ref{tab:critb}'s caption has the full sign convention). High "
+        r"$W$ with disagreeing signs (Peptides-struct) is the paper's central finding: "
+        r"backbones agree which PE is more local, not on what that locality means for the "
+        r"task. $^{\ddagger}$ Graphormer's probe used 10 test graphs/seed against 256 for "
+        r"GraphGPS/SAN (\S4); its rank and sign here should be read as \emph{not measured "
+        r"precisely enough to trust at face value} rather than as a confirmed data point "
+        r"(\S6).}"
     )
     lines.append(r"\label{tab:headline}")
     lines.append(r"\end{table}")
