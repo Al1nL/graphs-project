@@ -1,0 +1,4 @@
+backbone,n_pes,spearman_r,p,p_exact
+gps,4,0.19999999999999998,0.9166666666666666,True
+san,5,,,True
+ALL (pooled),9,0.8398412548412548,0.009259259259259259,True

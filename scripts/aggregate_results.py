@@ -29,12 +29,14 @@ cannot. Keep them in the appendix; do not rank cells with them.
 
 import argparse
 import glob
+import itertools
 import json
 import os
 import sys
 from collections import defaultdict
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
@@ -208,7 +210,7 @@ def build_summary_table(records, n_boot, weight_by_count, out_dir="results"):
             # RELATIVE-axis rho: rebin each graph onto d/diam(G) deciles, then pool. This
             # is the cross-dataset-comparable number; absolute rho is not, because the
             # absolute windows differ per dataset by design.
-            rel, rel_keys = [], []
+            rel, rel_keys, rel_seeds = [], [], []
             for e in entries:
                 if not e["diameter"]:
                     continue
@@ -216,6 +218,7 @@ def build_summary_table(records, n_boot, weight_by_count, out_dir="results"):
                 if c:
                     rel.append(c)
                     rel_keys.append(e["graph_id"])
+                    rel_seeds.append(e["seed"])
             if rel:
                 b_lo, b_hi = REL_RHO_WINDOW
                 rstat = lambda c: long_range_fraction(c, b_lo, b_hi, weight_by_count)  # noqa: E731
@@ -226,6 +229,22 @@ def build_summary_table(records, n_boot, weight_by_count, out_dir="results"):
                 row["rho_rel"], row["rho_rel_ci_lo"], row["rho_rel_ci_hi"] = r_rho, r_lo, r_hi
                 row["rho_rel_window"] = f"bins {b_lo}-{b_hi} of {REL_BINS}"
                 row["n_graphs_rel"] = len(set(rk)) if rk else len(rel)
+
+                # Seed spread of rho_rel itself, mirroring the absolute-rho block
+                # above -- NOT the same number. Both used to be reported under
+                # different names but only the absolute one was ever computed;
+                # make_paper_tables.py's significance rule needs THIS one (it
+                # compares against rho_rel's own CI, so the noise floor must be
+                # rho_rel's own seed spread, not absolute rho's).
+                by_seed_rel = defaultdict(list)
+                for c_, seed_ in zip(rel, rel_seeds):
+                    by_seed_rel[seed_].append(c_)
+                seed_rho_rels = [rstat(average_curves(cs)) for cs in by_seed_rel.values()]
+                seed_rho_rels = [v for v in seed_rho_rels if v == v]
+                if seed_rho_rels:
+                    s_rel = pd.Series(seed_rho_rels)
+                    row["rho_rel_seed_mean"] = s_rel.mean()
+                    row["rho_rel_seed_std"] = s_rel.std() if len(seed_rho_rels) > 1 else float("nan")
             else:
                 row["rho_rel"] = float("nan")
                 row["n_graphs_rel"] = 0
@@ -326,6 +345,54 @@ def plot_curves(records, out_dir="results"):
             print(f"Wrote {path}")
 
 
+def _exact_spearman_p(x, y, max_n=9):
+    """Exact permutation p-value for |Spearman r|, two-sided.
+
+    scipy.stats.spearmanr's default p is the ASYMPTOTIC t-approximation, which is
+    invalid at the n=4-5 this project actually has per backbone: it can (and did)
+    report values like p=0 or p=1.4e-24 that are below the exact test's own floor
+    of 2/n! (0.083 at n=4, 0.017 at n=5) -- impossible p-values, flagged in
+    external review. Enumerates all n! permutations of y's ranks against x's fixed
+    ranks and counts how many give |r| >= the observed |r|. Returns (p, exact:bool);
+    exact=False (falling back to scipy's asymptotic p) only above `max_n`, where
+    n! permutations would be too slow.
+    """
+    from scipy.stats import rankdata, spearmanr
+
+    n = len(x)
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    if n < 3 or np.all(x == x[0]) or np.all(y == y[0]):
+        # Correlation is undefined when either side is constant (e.g. SAN's
+        # PascalVOC-SP arm: rho_rel = 0 identically for every PE, per its own
+        # degenerate receptive-field limitation) -- must return NaN, not a
+        # spurious p from comparing against a NaN r_obs (every |perm| >= |nan|
+        # comparison is False in Python, which previously silently produced
+        # p=0.0, i.e. "maximally significant", for an undefined correlation).
+        return float("nan"), True
+    if n > max_n:
+        _, p = spearmanr(x, y)
+        return p, False
+    xr = rankdata(x)
+    yr_obs = rankdata(y)
+    # Spearman r is just Pearson r of the ranks; vectorize over EVERY
+    # permutation of yr_obs at once via the closed-form correlation formula
+    # instead of calling scipy.stats.spearmanr n! times (that first version
+    # took minutes at n=9 -- 362,880 calls -- each carrying scipy's per-call
+    # overhead; this is milliseconds, since it's a handful of numpy ops over
+    # an [n!, n] array).
+    perms = np.array(list(itertools.permutations(range(n))))  # [n!, n] index arrays
+    yr_perm = yr_obs[perms]  # [n!, n]
+    xr_c = xr - xr.mean()
+    yr_c = yr_perm - yr_perm.mean(axis=1, keepdims=True)
+    num = (xr_c * yr_c).sum(axis=1)
+    den = np.sqrt((xr_c ** 2).sum()) * np.sqrt((yr_c ** 2).sum(axis=1))
+    r_all = np.divide(num, den, out=np.zeros_like(num), where=den != 0)
+    r_obs = r_all[0]  # perms[0] is the identity permutation (range(n))
+    p = float(np.mean(np.abs(r_all) >= np.abs(r_obs) - 1e-9))
+    return p, True
+
+
 def criterion_b(df, out_dir="results"):
     """Does the PE ranking by rho track the PE ranking by task metric?
 
@@ -333,6 +400,13 @@ def criterion_b(df, out_dir="results"):
     a per-backbone test is close to uninformative on its own. Treat the per-cell numbers
     as descriptive and read the pooled row; the proposal's criterion (b) as written is
     underpowered and docs/analysis-plan.md records that.
+
+    SIGN CONVENTION (state this correctly in any caption -- got it backwards once):
+    y is negated when higher_better is False (MAE), so higher y ALWAYS means better
+    task performance. rho_rel is NOT negated. So r>0 means "less local (higher
+    rho_rel) goes with better task performance", and r<0 means "more local goes
+    with better task performance" -- i.e. a NEGATIVE r is the "more local => better
+    task" case, not a positive one.
     """
     try:
         from scipy.stats import spearmanr
@@ -356,14 +430,17 @@ def criterion_b(df, out_dir="results"):
                 continue
             # flip MAE so "higher is better" holds and the sign of r is interpretable
             y = cell["metric_mean"] if higher_better else -cell["metric_mean"]
-            r, p = spearmanr(cell[rho_col], y)
-            rows.append({"backbone": backbone, "n_pes": len(cell), "spearman_r": r, "p": p})
+            r, _ = spearmanr(cell[rho_col], y)
+            p, exact = _exact_spearman_p(cell[rho_col].to_numpy(), y.to_numpy())
+            rows.append({"backbone": backbone, "n_pes": len(cell), "spearman_r": r, "p": p,
+                         "p_exact": exact})
             pooled_x += list(cell[rho_col])
             pooled_y += list(y)
         if len(pooled_x) >= 4:
-            r, p = spearmanr(pooled_x, pooled_y)
+            r, _ = spearmanr(pooled_x, pooled_y)
+            p, exact = _exact_spearman_p(np.asarray(pooled_x), np.asarray(pooled_y))
             rows.append({"backbone": "ALL (pooled)", "n_pes": len(pooled_x),
-                         "spearman_r": r, "p": p})
+                         "spearman_r": r, "p": p, "p_exact": exact})
         if rows:
             path = os.path.join(out_dir, f"criterion_b_{dataset}.csv")
             pd.DataFrame(rows).to_csv(path, index=False)
