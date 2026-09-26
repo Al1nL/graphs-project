@@ -4,14 +4,15 @@ make_combined_curves_figure.py
 aggregate_results.py's plot_curves() writes one PNG per dataset with a per-axis
 legend (up to 14 backbone-PE lines on Peptides). Re-plots the SAME normalized
 curves -- identical data/normalization, just re-pooled here rather than
-re-computed -- as ONE combined figure (3 subplots) for a single figure* in the
-paper, with:
-  - color = backbone, linestyle = PE (fixed maps below), so the same PE is
-    visually comparable across the three panels instead of an arbitrary
-    per-panel color cycle, and
-  - ONE shared legend for the whole figure instead of three cluttered
-    per-panel ones -- with up to 14 series per panel, no per-panel legend at
-    readable font size fits in a 2.2in-wide subplot regardless of point size.
+re-computed -- as ONE combined figure for a single figure* in the paper.
+
+Layout: small multiples, one row per PE variant x one column per dataset, with
+color = backbone (only 3 levels, so a panel never has more than 3 overlapping
+lines and a single shared legend covers every panel). This replaces an earlier
+1x3 layout that used linestyle to distinguish 5 PE variants within one axis --
+five dash patterns at 1.1pt line width become indistinguishable once curves
+cross, especially on a log-scaled, noisy y-axis. Splitting PE onto its own row
+removes that channel entirely.
 
     python scripts/make_combined_curves_figure.py --in-dir results_all --out figures/sensitivity_norm_combined.png
 """
@@ -31,8 +32,8 @@ DATASET_LABEL = {"peptides-func": "Peptides-func", "peptides-struct": "Peptides-
                   "pascalvoc-sp": "PascalVOC-SP"}
 BACKBONE_COLOR = {"gps": "#1b78b4", "san": "#d1495b", "graphormer": "#2ca25f"}
 BACKBONE_LABEL = {"gps": "GraphGPS", "san": "SAN", "graphormer": "Graphormer"}
-PE_STYLE = {"none": (0, ()), "lappe": (0, (4, 1)), "rwse": (0, (1, 1)),
-            "signnet": (0, (3, 1, 1, 1)), "grpe": (0, (5, 1, 1, 1, 1, 1))}
+BACKBONE_ORDER = ["gps", "san", "graphormer"]
+PE_ORDER = ["none", "lappe", "rwse", "signnet", "grpe"]
 PE_LABEL = {"none": "No-PE", "lappe": "LapPE", "rwse": "RWSE",
             "signnet": "SignNet-PE", "grpe": "GRPE"}
 
@@ -47,42 +48,73 @@ def main(in_dir, out_path):
     by_ds = _curves_by_dataset(records)
     datasets = [d for d in ["peptides-func", "peptides-struct", "pascalvoc-sp"] if d in by_ds]
 
-    fig, axes = plt.subplots(1, len(datasets), figsize=(6.6, 2.5))
-    if len(datasets) == 1:
-        axes = [axes]
-    seen_pes, seen_backbones = set(), set()
-    for ax, dataset in zip(axes, datasets):
-        cells = by_ds[dataset]
-        for (backbone, pe), curves in sorted(cells.items()):
+    # Pre-pool every (dataset, backbone, pe) cell once so we know which PE rows
+    # actually have data before laying out the grid.
+    pooled_xy = {}
+    pes_present = set()
+    backbones_present = set()
+    for dataset in datasets:
+        for (backbone, pe), curves in by_ds[dataset].items():
+            if dataset == "pascalvoc-sp" and backbone == "san":
+                continue
             pooled = average_curves(curves)
             xs = sorted(pooled)
             try:
                 ys = [normalized_curve(pooled)[d] for d in xs]
             except (KeyError, ZeroDivisionError):
                 continue
-            ax.plot(xs, ys, lw=1.1, color=BACKBONE_COLOR[backbone], linestyle=PE_STYLE[pe])
-            seen_pes.add(pe)
-            seen_backbones.add(backbone)
-        ax.set_xlabel("Hop distance $d$", fontsize=7)
-        ax.set_ylabel(r"$\tilde{s}(d) = \bar{s}(d)/\bar{s}(1)$", fontsize=7)
-        ax.set_title(DATASET_LABEL[dataset], fontsize=8.5)
-        ax.set_yscale("log")
-        ax.tick_params(labelsize=6)
-        ax.grid(alpha=0.25, which="both", lw=0.4)
+            pooled_xy[(dataset, backbone, pe)] = (xs, ys)
+            pes_present.add(pe)
+            backbones_present.add(backbone)
+    pes = [p for p in PE_ORDER if p in pes_present]
 
-    # ONE shared legend: color = backbone, linestyle = PE, instead of one
-    # cluttered per-panel legend with up to 14 entries each.
-    color_handles = [mlines.Line2D([], [], color=BACKBONE_COLOR[b], lw=1.5, label=BACKBONE_LABEL[b])
-                      for b in ["gps", "san", "graphormer"] if b in seen_backbones]
-    style_handles = [mlines.Line2D([], [], color="black", lw=1.1, linestyle=PE_STYLE[p], label=PE_LABEL[p])
-                      for p in ["none", "lappe", "rwse", "signnet", "grpe"] if p in seen_pes]
-    fig.legend(handles=color_handles, title="Backbone (color)", fontsize=6, title_fontsize=6.5,
-               loc="lower center", bbox_to_anchor=(0.27, -0.06), ncol=len(color_handles), frameon=False)
-    fig.legend(handles=style_handles, title="PE (linestyle)", fontsize=6, title_fontsize=6.5,
-               loc="lower center", bbox_to_anchor=(0.75, -0.06), ncol=len(style_handles), frameon=False)
-    fig.suptitle(r"Normalized sensitivity $\tilde s(d) = \bar s(d)/\bar s(1)$",
-                 fontsize=9)
-    fig.tight_layout(rect=[0, 0.08, 1, 0.90])
+    n_rows, n_cols = len(pes), len(datasets)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(6.6, 1.55 * n_rows + 0.6),
+                              sharex="col", squeeze=False)
+
+    # Last row with data in each column -- that's where the x-axis label goes,
+    # since a column's final row can be an empty (data-less) panel we hide.
+    last_data_row = {}
+    for col, dataset in enumerate(datasets):
+        for row, pe in enumerate(pes):
+            if any(pooled_xy.get((dataset, b, pe)) is not None for b in BACKBONE_ORDER):
+                last_data_row[col] = row
+
+    for row, pe in enumerate(pes):
+        for col, dataset in enumerate(datasets):
+            ax = axes[row][col]
+            any_curve = False
+            for backbone in BACKBONE_ORDER:
+                xy = pooled_xy.get((dataset, backbone, pe))
+                if xy is None:
+                    continue
+                xs, ys = xy
+                ax.plot(xs, ys, lw=1.1, color=BACKBONE_COLOR[backbone])
+                any_curve = True
+            if not any_curve:
+                ax.axis("off")
+                continue
+            ax.set_yscale("log")
+            ax.tick_params(labelsize=6)
+            ax.grid(alpha=0.25, which="both", lw=0.4)
+            if row == 0:
+                ax.set_title(DATASET_LABEL[dataset], fontsize=8.5)
+            if row == last_data_row[col]:
+                ax.set_xlabel("Hop distance $d$", fontsize=7)
+                ax.tick_params(labelbottom=True)
+            if col == 0:
+                ax.set_ylabel(PE_LABEL[pe], fontsize=7.5, fontweight="bold")
+
+    fig.suptitle(r"Normalized sensitivity $\tilde s(d) = \bar s(d)/\bar s(1)$ by PE variant",
+                 fontsize=9, y=0.995)
+
+    legend_handles = [mlines.Line2D([], [], color=BACKBONE_COLOR[b], lw=1.5, label=BACKBONE_LABEL[b])
+                       for b in BACKBONE_ORDER if b in backbones_present]
+    fig.legend(handles=legend_handles, title="Backbone", fontsize=6.5, title_fontsize=7,
+               loc="lower center", ncol=len(legend_handles), frameon=False,
+               bbox_to_anchor=(0.5, -0.01 / n_rows))
+
+    fig.tight_layout(rect=[0, 0.045, 1, 0.97])
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     fig.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
