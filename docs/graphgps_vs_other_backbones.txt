@@ -1,0 +1,374 @@
+================================================================================
+GraphGPS COMPARED TO SAN AND GRAPHORMER -- A PLAIN-LANGUAGE WALKTHROUGH
+================================================================================
+Written 2026-09-26. Every number below was re-derived from results_all/ on the
+`results-all` branch and cross-checked against the report draft (graphs (1).pdf,
+7 pages, 5 body pages + references + appendix).
+
+Who this is for: anyone who needs to understand what the GraphGPS arm found,
+how it sits against the other two backbones, and which parts of that comparison
+are solid. No statistics background assumed.
+
+
+--------------------------------------------------------------------------------
+1. WHAT WE ACTUALLY MEASURED (two numbers per cell)
+--------------------------------------------------------------------------------
+A "cell" is one (backbone, PE, dataset) combination, trained with 3 random
+seeds. For each cell we record two things.
+
+TASK SCORE -- how good the model is at its job. Each dataset has its own:
+    Peptides-func     Average Precision   higher is better
+    Peptides-struct   Mean Absolute Error LOWER is better
+    PascalVOC-SP      macro-F1            higher is better
+
+rho_rel -- HOW FAR the model's influence reaches. Built like this:
+
+  a. Pick a test graph. Pick a target node v.
+  b. Nudge some other node u's input slightly. Measure how much v's output moves.
+     (Formally: the Frobenius norm of the Jacobian block d h_v / d x_u. The norm
+     collapses a matrix of derivatives into one magnitude, so positive and
+     negative effects cannot cancel out.)
+  c. Group every (u, v) pair by how many hops apart they are. Average within
+     each group. That gives a decay curve s_bar(d).
+  d. rho_rel = the share of that curve's total mass sitting BEYOND HALF the
+     graph's diameter.
+
+READ rho_rel AGAINST 0.5, NOT AGAINST ZERO:
+
+    rho_rel = 0.5    every distance matters equally (a flat curve)
+    rho_rel > 0.5    distant nodes matter MORE than near ones -> far-reaching
+    rho_rel < 0.5    influence concentrated nearby            -> "local"
+
+Why a share rather than a raw magnitude: raw sensitivity varies about two-fold
+between arms of the SAME backbone (s_bar(1) runs 18.9 to 37.3 across GraphGPS's
+four Peptides-func arms) purely from initialisation scale and where the
+normalisation layers sit. That has nothing to do with long-range behaviour. A
+ratio divides it out exactly.
+
+
+--------------------------------------------------------------------------------
+2. WHAT GraphGPS FOUND, DATASET BY DATASET
+--------------------------------------------------------------------------------
+GraphGPS has 4 PE arms, not 5: the GRPE arm was designed but never wired into
+training, so it raises rather than running.
+
+PEPTIDES-STRUCT -- the clear result.
+
+    arm        MAE (lower better)   rho_rel    vs No-PE
+    No-PE      0.3740                0.5258     --
+    LapPE      0.2505  (-33%)        0.4650    -0.061  significant
+    RWSE       0.2791  (-25%)        0.4830    -0.043  significant
+    SignNet    0.2563  (-31%)        0.4584    -0.067  significant
+
+Every PE improves the task by a lot, and every PE simultaneously moves
+sensitivity NEARER. No-PE sits above the 0.5 line (far-reaching); all three PEs
+sit below it (local). All three differences are significant on both tests we
+apply (see §5).
+
+This is the opposite of the intuitive story. "PEs tell the model about distant
+structure, so they should extend its reach" predicts rho_rel going UP. It goes
+down, and the task gets much better at the same time.
+
+PEPTIDES-FUNC -- the same graphs, a different task, a much weaker effect.
+
+    arm        AP (higher better)   rho_rel    vs No-PE
+    No-PE      0.6285                0.5060     --
+    LapPE      0.6537                0.4970    -0.009  not significant
+    RWSE       0.6459                0.5032    -0.003  not significant
+    SignNet    0.6198                0.5185    +0.013  marginal (see below)
+
+Here a PE buys about +4% AP instead of -33% MAE, and nothing moves much.
+SignNet's star is technically earned but should be read as marginal: its
+confidence interval clears No-PE's by 0.000062, which is 0.48% of the interval's
+own width. A slightly different bootstrap seed could erase it.
+
+PASCALVOC-SP -- PEs HURT the task, and nothing moves.
+
+    arm        macro-F1 (higher better)   rho_rel    vs No-PE
+    No-PE      0.3929                      0.3173     --
+    LapPE      0.3738                      0.3238    +0.007  not significant
+    RWSE       0.3807                      0.3188    +0.001  not significant
+    SignNet    0.3595                      0.3130    -0.004  not significant
+
+Every PE makes the model worse. That is not our oddity -- the GraphGPS paper
+reports the same thing (0.3846 without LapPE vs 0.3748 with it). And once again,
+where the PE doesn't help, the sensitivity profile doesn't move.
+
+THE PATTERN ACROSS ALL THREE:
+
+    PE helps the task a lot   ->  significantly MORE LOCAL
+    PE helps a little         ->  no measurable change
+    PE hurts                  ->  no measurable change
+
+So positional encodings reshape where sensitivity lives only where they are
+actually doing work for the task.
+
+WHY THE TWO PEPTIDES DATASETS DIFFER SO MUCH, despite identical graphs: their
+curve shapes are qualitatively different. Peptides-func decays monotonically
+(33.1 at d=1 down to 2.2 at d=80). Peptides-struct is U-SHAPED -- it falls to a
+minimum near d=13 and then RISES again out to d=80, so the most distant nodes
+matter more than mid-range ones. That fits the task: -struct predicts global
+geometric descriptors (length, inertia), which depend on where a chain's
+extremities are. The PE effect lives in that rising tail: from d=13 to d=80,
+No-PE rises +12%, RWSE +59%, LapPE +43%, while SignNet FALLS 17%.
+
+
+--------------------------------------------------------------------------------
+3. SANITY CHECK: DOES OUR GraphGPS MATCH THE PUBLISHED PAPER?
+--------------------------------------------------------------------------------
+This matters before any cross-backbone claim. A PE ranking measured on a
+badly-reproduced backbone means nothing.
+
+    dataset            published (GPS paper)   ours      difference
+    Peptides-func      0.6535 AP               0.6537    +0.0002
+    Peptides-struct    0.2500 MAE              0.2505    +0.0005
+    PascalVOC-SP       0.3748 F1               0.3740    -0.0008
+
+All three within 0.001. And this is a STRONGER check than it looks: our LapPE
+comes from this project's shared cache (symmetrically-normalised Laplacian, 16
+non-trivial eigenvectors, zero-padded) while GraphGPS computes its own
+differently (unnormalised, 10 eigenvectors, trivial one kept, L2-normed).
+Reproducing the published number through a DIFFERENT LapPE definition says the
+task metric isn't sensitive to those conventions.
+
+For contrast, the SAN branch does not reproduce as well (§4).
+
+
+--------------------------------------------------------------------------------
+4. HOW THE OTHER TWO BACKBONES COMPARE
+--------------------------------------------------------------------------------
+SAN -- same direction as GraphGPS where it can be compared, but far more extreme
+and with a reproduction problem.
+
+  Peptides-struct         rho_rel          MAE
+    No-PE                 0.2321           0.3962
+    LapPE                 0.0202  sig      0.2961
+    RWSE                  0.3061           0.3056
+    SignNet               0.0237  sig      0.2824
+    GRPE                  0.0065  sig      0.2808
+
+  Three of five PEs COLLAPSE to almost zero rho_rel -- ten times lower than
+  GraphGPS's shift, not a comparable-size effect. RWSE goes the other way
+  (elevated, above No-PE). The same LapPE/GRPE collapse and RWSE elevation
+  appear on Peptides-func too, so they are consistent across the two datasets.
+
+  SignNet is NOT consistent: it groups with RWSE on -func (0.183) and with the
+  collapsed pair on -struct (0.024), on identical graphs. There is no mechanistic
+  explanation available, because in SAN's code all four PEs are routed through
+  the SAME dispatch slot, differing only in an internal encoder variant (GRPE
+  alone adds an attention-bias term on top). So "how the PE enters the model"
+  cannot distinguish them -- a hypothesis the draft originally proposed and has
+  correctly since withdrawn.
+
+  Two confounds are partial alternatives, not explanations. On Peptides-func the
+  collapse lines up exactly with parameter count (LapPE/GRPE ~928K vs the others
+  ~791K). But that does NOT hold on -struct, where LapPE and No-PE are both
+  ~928K yet rho_rel is 0.020 vs 0.232. And SAN's probe uses T=128 target nodes
+  on graphs averaging 150 nodes, so 54% of its probe graphs are exhaustively
+  enumerated rather than sampled -- a different estimator for over half the data.
+
+  PascalVOC-SP is DEGENERATE, not null: rho_rel = 0.0000 exactly for all five
+  PEs, with zero seed variance. SAN was configured with sparse edge-only
+  attention over 8 layers, giving an 8-hop receptive field against a window
+  starting at d=14. Sensitivity beyond 8 hops is identically zero by
+  construction. Its task numbers are real; its sensitivity numbers are not.
+
+  Reproduction: our SAN branch is close to published on Peptides-struct
+  (0.296 vs 0.268) but far below on Peptides-func (0.479 vs 0.638) and
+  PascalVOC-SP (0.174 vs 0.323, about half). SAN ships no official LRGB config,
+  so the architecture is this project's own construction. The gap is in task
+  performance rather than in rho_rel, so it doesn't overturn the sensitivity
+  findings -- but "every PE helps SAN's F1" should be read as a property of our
+  branch, not a literature-validated result.
+
+GRAPHORMER -- cannot be compared, and this is the most important single fact in
+the whole cross-backbone story.
+
+  Peptides-struct         rho_rel      MAE
+    No-PE                 0.5823       0.2638
+    LapPE                 0.5798       0.2669
+    RWSE                  0.5846       0.2607
+    SignNet               0.5772       0.2689
+    GRPE                  0.5807       0.2643
+
+  All five numbers sit inside a band 0.0074 wide, and nothing is significant.
+  That looks like a clean null. It is not a result at all, because:
+
+      Graphormer's probe used 10 test graphs per seed.
+      GraphGPS and SAN used 256.
+
+  That is a 25x smaller sample, and it shows up exactly where you would predict:
+
+      backbone      distinct graphs   interval width
+      GraphGPS      692               0.0083
+      Graphormer     30               0.0364     4.4x wider
+      (1/sqrt(n) from 30 vs 692 predicts 4.8x -- so the width is
+       driven by the sample size, not by the model)
+
+  Its interval (0.036) and its seed-to-seed wobble (0.024) are both several
+  times LARGER than the entire 0.0074 spread across its five PEs. So the PE
+  ordering is being read off differences smaller than the measurement error --
+  like ranking four objects that differ by a millimetre with a ruler marked in
+  centimetres.
+
+  Consequence: "none of Graphormer's PEs separates from No-PE" is guaranteed by
+  the sample size, not learned from the data. Its task-metric spread (3% MAE vs
+  GraphGPS's 24%) is equally consistent with a genuinely compressed range or
+  with the small sample -- those cannot be distinguished from what we have.
+
+  There is also no published Graphormer baseline on these datasets (Ying et al.
+  2021 predates LRGB), so there is no external check either.
+
+  Re-probing at 256 graphs is cheap -- no retraining, just the probe -- and is
+  the single highest-value remaining run.
+
+
+--------------------------------------------------------------------------------
+5. WHAT THE BACKBONES AGREE AND DISAGREE ABOUT
+--------------------------------------------------------------------------------
+Two separate questions, often confused.
+
+QUESTION 1: do the backbones put the PEs in the same order of locality?
+Measured by Kendall's W (coefficient of concordance), 0 = no agreement,
+1 = perfect. On Peptides-struct, with the 4 PEs all three share:
+
+    all three backbones     W = 0.822   exact p = 0.033   significant
+    GraphGPS + SAN only     W = 0.800   exact p = 0.208   NOT significant
+
+All three do rank SignNet/LapPE as more local than RWSE/No-PE. But note what the
+second line means: the agreement crosses the significance threshold only WITH
+Graphormer included -- and Graphormer is the backbone with 25x less probe data.
+Dropping it barely changes W (0.822 -> 0.800) but destroys the p-value, because
+a 2-rater exact test has much less power. So the significant agreement depends
+on the rater we trust least.
+
+QUESTION 2: does being more local go with a BETTER task score?
+Measured by Spearman correlation within each backbone, with MAE sign-flipped so
+higher always means better. With that flip, a NEGATIVE correlation is the
+"more local => better task" case.
+
+    Peptides-struct    GraphGPS    r = -0.80   exact p = 0.333
+                       SAN         r = -0.80   exact p = 0.133
+                       Graphormer  r = +1.00   exact p = 0.0167
+
+GraphGPS and SAN agree in sign (more local => better). Graphormer is the
+opposite. That apparent reversal is the paper's "sign flip" -- and it is exactly
+the number built on the 0.0074 spread above, so it is unresolved rather than
+contradictory.
+
+Also note: with only 4-5 PEs per backbone, NONE of the per-backbone correlations
+clears p<0.05 except Graphormer's. That is low power from a small number of PEs,
+not evidence against the pattern -- but it means the signs are suggestive, not
+established.
+
+WHAT DOES NOT TRANSFER, concretely:
+  - LapPE is GraphGPS's BEST PE on Peptides-struct (MAE 0.251) and SAN's
+    second-WORST there (0.296, beating only No-PE) -- on the identical graphs.
+  - GraphGPS and SAN agree that no PE helps sensitivity on PascalVOC-SP, and
+    disagree completely on the task: every PE hurts GraphGPS's F1, every PE
+    helps SAN's.
+
+A WARNING ABOUT THE POOLED CORRELATIONS: the draft reports a significant pooled
+correlation on PascalVOC-SP (r=0.84, exact p=0.00926). Do not read it as a
+sensitivity-performance relationship. All five SAN points sit at rho_rel = 0
+(the degenerate values above) with F1 uniformly below every GraphGPS point, so
+the correlation is measuring "SAN is worse than GraphGPS on both axes" -- a
+between-backbone offset. Within GraphGPS alone the same correlation is +0.20.
+
+
+--------------------------------------------------------------------------------
+6. WHAT IS SOLID AND WHAT IS NOT
+--------------------------------------------------------------------------------
+SOLID:
+  * GraphGPS's Peptides-struct result. Large effects (0.043-0.067), all three
+    PEs, significant on both the interval test and the seed-variance test, and
+    confirmed independently by a graph-paired bootstrap. The branch reproduces
+    its published task numbers to within 0.001 on all three datasets.
+  * The three-dataset pattern (helps a lot -> more local; helps little or hurts
+    -> no change). Consistent across three datasets and two backbones.
+  * SAN's LapPE/GRPE collapse and RWSE elevation across both Peptides datasets,
+    confirmed per-graph by the paired bootstrap.
+  * That no single best-PE choice transfers across backbones.
+
+NOT SOLID:
+  * Anything resting on Graphormer -- including the headline sign flip and the
+    significance of the cross-backbone rank agreement.
+  * SAN's PascalVOC-SP sensitivity numbers (degenerate by construction) and
+    anything pooled that includes them.
+  * SAN's task-performance level on Peptides-func and PascalVOC-SP (branch-
+    specific, roughly half the published F1 on VOC).
+  * GraphGPS's marginal SignNet star on Peptides-func (0.48% of an interval).
+
+MEASUREMENT CAVEATS WORTH KNOWING:
+  * The probe differentiates each backbone's FULL hidden width -- 96 GraphGPS,
+    80 SAN/Graphormer, 64 SAN on VOC -- so PE channels are included wherever a
+    backbone concatenates them. This is the only definition applicable to all
+    three: Graphormer ADDS its projected PE into the same channels, so no
+    content/PE column split exists for it and a content-only probe cannot even
+    be defined there.
+    If PE channels carry disproportionately long-range information -- which is
+    what a PE is for -- this inflates rho_rel for PE arms, meaning the
+    reductions reported are CONSERVATIVE, not optimistic.
+  * The target-node budget T is calibrated per (backbone, dataset) and differs
+    widely: GraphGPS 8/32/64, SAN 128/128/300, Graphormer 16. rho is unbiased in
+    T, so this affects precision only -- but SAN's T=128 saturates 54% of its
+    peptides probe graphs.
+  * SignNet is not parameter-matched on GraphGPS: 576,138 against ~503-507K for
+    the other three arms (+14%), and its physical batch was halved to 64 with 2
+    accumulation steps to fit an 11GB card, so its BatchNorm statistics come
+    from 64 graphs where the others use 128.
+
+
+--------------------------------------------------------------------------------
+7. VALIDATION LOG -- WHAT WAS CHECKED AGAINST WHAT
+--------------------------------------------------------------------------------
+Source of truth: results_all/summary_table.csv (37 rows), the 111 per-cell
+result JSONs, results_all/paired_bootstrap.csv, results_all/kendall_w.csv, and
+results_all/criterion_b_*.csv on branch `results-all`.
+
+VERIFIED CORRECT IN THE DRAFT:
+  [x] Table 2 (task metric), all 37 cells -- exact to the last digit
+  [x] Table 3 (rho_rel), all 37 cells -- exact
+  [x] Star pattern, including SAN+LapPE on Peptides-func, which the earlier
+      draft was missing (the star rule's noise floor had used the ABSOLUTE-rho
+      seed sd against a rho_rel gap; recomputing with the correct rho_rel sd
+      adds exactly this one star and changes nothing else)
+  [x] Paired bootstrap numbers (-0.0072, +0.0146, +0.0077, +0.0044)
+  [x] Exact permutation p-values in Table 7: 0.0833 / 0.35 / 0.0833 / 0.333 /
+      0.0167 / 0.133 / 0.917, and the pooled VOC 0.00926
+  [x] Kendall W: 0.822 p=0.033 (3 raters), 0.800 p=0.208 (2 raters),
+      0.556 p=0.207 (func) -- all three reproduce exactly
+  [x] Probe budgets: 256/256/10 graphs per seed
+  [x] n_shared_feats: 96 / 80 / 80, each equal to that backbone's full hidden
+      width, so no arm drops any coordinate
+  [x] Parameter counts, including SignNet's 576,138
+  [x] 37 of 45 cells, 111 runs, every cell at 3 seeds
+  [x] GraphGPS reproduces its published numbers within 0.001
+  [x] All four PEs in SAN share one dispatch slot (PE_SPEC), so the withdrawn
+      mechanistic story really is unsupported
+
+STILL WORTH FIXING IN THE DRAFT:
+  1. THE ABSTRACT OVERSTATES THE AGREEMENT. It reads "GraphGPS and SAN agree ...
+     Kendall's W=0.82, p=0.033 on their shared ranking". But W=0.82 / p=0.033 is
+     the THREE-backbone value; GraphGPS+SAN alone give W=0.800, p=0.208 -- not
+     significant. Section 5.2 states this honestly; the abstract does not, and
+     the abstract is what gets read. Either attribute W=0.82 to all three
+     backbones, or quote 0.800/0.208 for the pair.
+  2. "cutting MAE 24-33%" (Sec. 5.1) -- the actual range is 25-33%
+     (RWSE 25.4%, LapPE 33.0%).
+  3. Section 4 refers to "Table 1's ~27 diameter figure", but Table 1 prints
+     "~20-28". One of the two should change.
+  4. "36 of 45 GraphGPS-arm cells" (Sec. 3.1, Sec. 4) counts seeds, while the
+     abstract's "37 of 45 cells" does not. Both arithmetics are right; the word
+     "cells" means two different things. Suggest "runs" for the seed-inclusive
+     counts.
+  5. Section 3.2 gives n_shared_feats as "96 for GraphGPS, 80 for SAN/
+     Graphormer on Peptides" but omits SAN's 64 on PascalVOC-SP.
+
+OPTIONAL EXPERIMENT THAT WOULD STRENGTHEN Sec. 3.2: re-probe GraphGPS's
+Peptides-struct arms at content-only width (96/80/76/64) and compare rho_rel to
+the full-width numbers. rho is a ratio within each cell, so differing widths
+across arms remain comparable -- which means this is a valid check even though
+it cannot be the primary metric (Graphormer cannot produce it). If the gaps hold
+or widen, the "conservative" claim becomes measured rather than argued. Needs no
+retraining; about an hour of probe time for four arms.
