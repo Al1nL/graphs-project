@@ -223,7 +223,7 @@ of confound we can't fully remove, only document.
 # 1. FORK each backbone on GitHub, add the fork URL to src/config.py FORK_URLS, then:
 bash scripts/setup_upstream.sh          # clones your forks as siblings, adds an
                                         # `upstream` remote, checks out the pinned commit
-# Do NOT `git clone` upstream directly -- pre-flight rejects it (see "Version locking").
+# Do NOT `git clone` upstream directly -- pre-flight rejects it.
 # Status today: gps forked and pinned; san forked but not yet pinned; graphormer still
 # needs forking.
 
@@ -249,46 +249,6 @@ python scripts/calibrate_target_nodes.py --backbone gps --dataset peptides-func 
 python scripts/launch.py --dry-run
 python scripts/launch.py --num-target-nodes 32 --preset reduced --wandb
 ```
-
-## Version locking
-
-Three things drift underneath this project, and each would silently invalidate results
-rather than break loudly:
-
-| Drifts | Locked by | Detected by |
-|---|---|---|
-| the three cloned upstream backbones | `config.PINNED_COMMITS` | `launch.py` pre-flight |
-| our PE computation | `config.PE_CACHE_VERSION` + cache manifest | `PECache` refuses a stale cache |
-| our analysis code | `config.repo_sha()` | recorded in every result row |
-
-`PINNED_COMMITS` starts as `None`, not `"main"` — a `None` is a checkable "nobody pinned
-this yet", whereas `"main"` is a lie that looks like a pin. A grid run half before and half
-after an upstream change is not a controlled comparison, so `launch.py` refuses to start
-until the pins are filled (override with `--no-strict-pins` for throwaway runs only).
-
-### Why forks, given we already pin commits
-
-A SHA is a *reference*: it assumes the object still exists on someone else's server. Pinning
-survives ordinary upstream drift, but **not** a force-push, a rename, or a deletion — in all
-three the pin dangles and there is no way back to the pinned state. The fork preserves the
-objects; the pin identifies which one. They are complementary, not alternatives.
-
-The fork is also the only sane home for our architectural adaptations: SAN+GRPE and
-GraphGPS's GRPE attention-bias hook are genuine additions to the published models, and
-uncommitted edits inside an unversioned clone is the most fragile place they could sit.
-
-`check_pinned` therefore verifies that each clone's `origin` is *your fork*, not upstream —
-a clone of upstream carries the same SHA today and loses it the moment upstream rewrites
-history. HTTPS and SSH remote forms are treated as equivalent.
-
-| backbone | forked | pinned |
-|---|---|---|
-| GraphGPS | `pazflashner/GraphGPS` | `28015707` |
-| SAN | `Al1nL/SAN` | not yet |
-| Graphormer | not yet | — |
-
-**All teammates must pin the same forks.** If two people pin different ones, their results
-are not comparable and the grid silently stops being a controlled experiment.
 
 ## PE cache format
 
