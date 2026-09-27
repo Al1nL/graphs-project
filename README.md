@@ -24,7 +24,8 @@ The professor's comment was: don't let a PE's apparent effect be a GraphGPS-spec
 artifact, and don't let a dataset's result be a Peptides-func-specific artifact. So we now
 vary two axes independently:
 
-- **Backbone axis** (architecturally distinct, see `docs/rationale.docx` for the reasoning):
+- **Backbone axis** (architecturally distinct; the design rationale is meant to live in
+  `docs/rationale.docx`, but that file has not been added to this repo yet):
   1. **GraphGPS** (hybrid MPNN + Transformer) — primary backbone, unchanged from the proposal.
   2. **SAN** (Spectral Attention Network) — full/sparse attention with a dedicated *learned*
      spectral PE module; no message-passing branch.
@@ -212,8 +213,9 @@ T, because the CI is dominated by between-graph variance that does not shrink wi
 
 Every backbone gets all 5 PEs so the grid is fully crossed, but two cells (SAN+GRPE,
 GraphGPS-attention-bias-GRPE) required a genuine architectural adaptation rather than a
-drop-in. This is called out explicitly in the paper draft and in `docs/rationale.docx` —
-it's a source of confound we can't fully remove, only document.
+drop-in. This needs to be called out explicitly wherever the paper draft and
+`docs/rationale.docx` end up living — neither exists in this repo yet — as it's a source
+of confound we can't fully remove, only document.
 
 ## Environment setup (on your own GPU machine)
 
@@ -222,7 +224,8 @@ it's a source of confound we can't fully remove, only document.
 bash scripts/setup_upstream.sh          # clones your forks as siblings, adds an
                                         # `upstream` remote, checks out the pinned commit
 # Do NOT `git clone` upstream directly -- pre-flight rejects it (see "Version locking").
-# Status today: gps forked and pinned; san and graphormer still need forking.
+# Status today: gps forked and pinned; san forked but not yet pinned; graphormer still
+# needs forking.
 
 # 2. Create one env per backbone (their pinned dependency sets conflict with each other -
 #    GraphGPS wants PyG>=2.0 + torch 1.9-2.x, SAN pins an older PyG/DGL combo, Graphormer
@@ -281,7 +284,7 @@ history. HTTPS and SSH remote forms are treated as equivalent.
 | backbone | forked | pinned |
 |---|---|---|
 | GraphGPS | `pazflashner/GraphGPS` | `28015707` |
-| SAN | not yet | — |
+| SAN | `Al1nL/SAN` | not yet |
 | Graphormer | not yet | — |
 
 **All teammates must pin the same forks.** If two people pin different ones, their results
@@ -321,7 +324,8 @@ and unreachable pairs.
 ## Compute budget reality check
 
 Full grid = 3 backbones × 5 PEs × 3 datasets × 3 seeds = **135 runs**. If that's not
-feasible before the deadline, the fallback (documented in `docs/rationale.docx`) is:
+feasible before the deadline, the fallback (meant to be documented in `docs/rationale.docx`,
+which doesn't exist in this repo yet) is:
 drop to 1 seed for the two new backbones and keep 3 seeds only for GraphGPS (the primary
 backbone), and/or drop PascalVOC-SP to a 20% node-subsampled variant for the SAN arm only
 (SAN's full attention is O(n²) and PascalVOC-SP graphs average ~480 nodes).
