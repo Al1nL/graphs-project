@@ -1,17 +1,6 @@
 #!/bin/bash
 # Runs the full (backbone x PE x dataset x seed) grid.
-# Full grid: 3 backbones x 5 PEs x 3 datasets x 3 seeds = 135 runs.
-#
-# Usage:
-#   bash scripts/run_all.sh full        # everything, 3 seeds
-#   bash scripts/run_all.sh reduced      # fallback grid if compute is tight (see below)
-#
-# The "reduced" mode implements the fallback described in README.md / docs/rationale.docx:
-#   - GraphGPS (primary backbone): full 5 PEs x 3 datasets x 3 seeds
-#   - SAN, Graphormer (secondary backbones): 5 PEs x 3 datasets x 1 seed
-# This keeps the primary backbone's numbers publication-quality (seed variance reported)
-# while still getting every backbone x PE x dataset cell filled in at least once, which is
-# the minimum needed to answer "is this PE effect backbone-specific?".
+# Full grid: 3 backbones x 4 PEs x 3 datasets x 3 seeds = 108 runs.
 
 set -e
 MODE=${1:-full}
@@ -22,7 +11,7 @@ if [ "$MODE" = "reduced" ]; then
 fi
 
 DATASETS=("peptides-func" "peptides-struct" "pascalvoc-sp")
-PES=("none" "lappe" "rwse" "signnet" "grpe")
+PES=("none" "lappe" "rwse" "signnet")
 
 for ds in "${DATASETS[@]}"; do
   for pe in "${PES[@]}"; do
@@ -36,4 +25,4 @@ for ds in "${DATASETS[@]}"; do
   done
 done
 
-echo "Done. Aggregate results/*.json once training is wired in (see run_experiment.py stubs)."
+echo "Done. Aggregate results/*.json once training is wired in."

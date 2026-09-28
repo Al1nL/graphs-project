@@ -109,39 +109,20 @@ def _demo_factory(seed=0):
 
 
 def load_real(backbone, pe, dataset, checkpoint, n_graphs):
-    """Load a trained checkpoint and return (model_fn_factory, graphs, n_shared_feats).
+    """Load a trained GraphGPS model from checkpoint and prepare probe data.
 
-    THE CONTRACT sweep_target_nodes ACTUALLY NEEDS, READ THIS BEFORE CHANGING IT: it calls
-    `compute_sensitivity_curve(model_fn_factory(data), data, ...)` -- the SAME `data` object
-    is used both to build model_fn AND as the thing whose `.x` gets differentiated. Demo
-    mode satisfies this because its synthetic graphs are already continuous (`data.x =
-    torch.randn(...)`). GraphGPS's real input is NOT: LRGB node features are integer
-    atom-type indices consumed by an nn.Embedding lookup, so d h / d x is undefined for
-    them (see backends/graphgps_backend.py's header) -- the probe must instead differentiate
-    h^(0), the encoder's OUTPUT. `graphs` below is therefore a list of h^(0)-space
-    `probe_data` objects (built once via run_experiment.make_model_fn), each with its
-    matching `model_fn` attached as an attribute, so `factory(data)` can just read it back
-    off `data` rather than needing the original raw graph in scope.
-
-    Only "gps" is wired, matching run_experiment.PROBE_WIRED_BACKBONES. `checkpoint` must be
-    a state_dict saved by GraphGPS's own training loop; `build_graphgym_cfg` reconstructs
-    the exact architecture that state_dict was trained under from (pe, dataset) -- passing
-    the wrong `--pe` for a given checkpoint loads weights into a differently-shaped model
-    and fails loudly (via `load_state_dict(strict=False)`'s missing/unexpected keys), not
-    silently.
+    Returns (factory, graphs, n_shared_feats) where `graphs` are probe_data objects
+    carrying their corresponding model_fn attribute.
     """
     if backbone != "gps":
         raise NotImplementedError(
-            f"load_real is wired for 'gps' only (matches run_experiment.PROBE_WIRED_"
-            f"BACKBONES); '{backbone}' still needs its own probe wrapper. Use --demo to "
-            "exercise the calibration pipeline itself in the meantime."
+            f"load_real is wired for 'gps' only; '{backbone}' uses its own loader. "
+            "Use --demo to exercise the calibration pipeline itself in the meantime."
         )
     if not checkpoint:
         raise ValueError(
-            "--checkpoint is required for backbone=gps: this loads a TRAINED model's "
-            "weights, it does not train one. Point it at the checkpoint GraphGPS's own "
-            "training loop wrote for this exact (pe, dataset) -- see cfg.out_dir in "
-            "backends.graphgps_backend.build_graphgym_cfg."
+            "--checkpoint is required for backbone=gps: point it at the checkpoint "
+            "file for this (pe, dataset) run."
         )
 
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
@@ -153,9 +134,6 @@ def load_real(backbone, pe, dataset, checkpoint, n_graphs):
     from torch_geometric.graphgym.loader import create_loader
     from torch_geometric.graphgym.model_builder import create_model
 
-    # seed=0 here reconstructs the ARCHITECTURE only -- calibration is a property of the
-    # probe and the graph regime, not of the training seed, so which seed's checkpoint you
-    # point at should not matter, and it is not recorded as part of what this returns.
     run_cfg = RunConfig(backbone=backbone, pe=pe, dataset=dataset, seed=0)
     build_graphgym_cfg(run_cfg, graphgps_dir)
     loaders = create_loader()
@@ -167,9 +145,8 @@ def load_real(backbone, pe, dataset, checkpoint, n_graphs):
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
     if missing or unexpected:
         raise RuntimeError(
-            f"checkpoint at {checkpoint} does not match the architecture built for "
-            f"(pe={pe!r}, dataset={dataset!r}): missing={missing}, unexpected={unexpected}. "
-            "This usually means --pe doesn't match what the checkpoint was trained with."
+            f"checkpoint at {checkpoint} does not match architecture for "
+            f"(pe={pe!r}, dataset={dataset!r}): missing={missing}, unexpected={unexpected}."
         )
     model.eval()
 
@@ -180,7 +157,7 @@ def load_real(backbone, pe, dataset, checkpoint, n_graphs):
     n_shared_feats = None
     for raw in raw_graphs:
         model_fn, probe_data, meta = make_model_fn(model, backbone, raw)
-        probe_data.model_fn = model_fn   # stashed so factory() below needs no extra state
+        probe_data.model_fn = model_fn
         graphs.append(probe_data)
         if n_shared_feats is None:
             n_shared_feats = meta["dim_inner"]
@@ -192,30 +169,17 @@ def load_real(backbone, pe, dataset, checkpoint, n_graphs):
 
 
 def load_real_san(pe, dataset, seed, results_dir, n_graphs):
-    """SAN equivalent of load_real, above. Same contract: returns (factory, graphs,
-    n_shared_feats), where `graphs` are h^(0)-space probe_data objects with their
-    matching model_fn stashed on them as an attribute, so factory(data) just reads it
-    back off data -- see load_real's own docstring for why that shape is required by
-    sweep_target_nodes.
+    """Load a trained SAN model from results_dir and prepare probe data.
 
-    Unlike GPS's path, this does NOT take an explicit --checkpoint argument: SAN's
-    san_train persists final weights itself, at a predictable path
-    (results/model_san_<pe>_<dataset>_seed<seed>.pt -- see san_backend.py's
-    changelog for why this didn't exist until now), so this just needs (pe, dataset,
-    seed) to find it, the same way `run_experiment.py` finds a run's result JSON.
-
-    Loads net_params from the SAME file the weights were saved with (also written by
-    san_train), so the reconstructed architecture is guaranteed consistent with the
-    trained weights -- no separate "pass --pe and hope it matches" step like GPS's
-    load_real needs, since that information is bundled with the checkpoint here
-    rather than being reconstructed from scratch via build_graphgym_cfg.
+    Returns (factory, graphs, n_shared_feats) where `graphs` are probe_data objects
+    carrying their corresponding model_fn attribute.
     """
     model_path = os.path.join(
         results_dir, f"model_san_{pe}_{dataset}_seed{seed}.pt")
     if not os.path.exists(model_path):
         raise FileNotFoundError(
             f"no saved model at {model_path}. This is written by san_train on "
-            f"completion (see san_backend.py's changelog) -- run "
+            f"completion -- run "
             f"`python src/run_experiment.py --backbone san --pe {pe} --dataset "
             f"{dataset} --seed {seed} ...` to completion first, or check --results-dir "
             "if that run used a non-default one."
@@ -249,13 +213,7 @@ def load_real_san(pe, dataset, seed, results_dir, n_graphs):
     model.eval()
 
     # run_cfg is needed only to build a _PEAttachedDataset-backed test split matching
-    # what this model was trained on (max_nodes filtering, full_graph flag, etc.) --
-    # NOT to retrain anything. seed=0 here mirrors load_real's own note: calibration
-    # is a property of the probe/graph regime, not the training seed, so which
-    # seed's saved model is used for calibration doesn't need to match run_cfg.seed
-    # -- but the ACTUAL trained seed IS used (not hardcoded to 0) since a real
-    # calibration run should reflect a real trained model, unlike GPS's demo-adjacent
-    # note about seed being irrelevant to architecture reconstruction specifically.
+    # what this model was trained on (max_nodes filtering, full_graph flag, etc.).
     run_cfg = RunConfig(backbone="san", pe=pe, dataset=dataset, seed=seed)
     from backends.san_backend import build_san_net_params, build_san_train_params, _build_loaders
     built_net_params = build_san_net_params(run_cfg)
@@ -341,12 +299,7 @@ def main():
                     help="reject a rung whose sparsest distance bucket holds fewer than "
                          "this many pairs, however stable rho looks there")
     ap.add_argument("--n-boot", type=int, default=500)
-    # --seed: for --demo, seeds the synthetic-graph RNG. For --backbone san,
-    # ALSO selects which seed's saved model to load
-    # (results/model_san_<pe>_<dataset>_seed<SEED>.pt) -- reuses this single
-    # flag rather than adding a second one, since argparse rejects duplicate
-    # --seed registrations (this WAS a duplicate before being merged in).
-    # Ignored for --backbone gps, which takes an explicit --checkpoint path.
+    # Seed for synthetic-graph RNG in demo mode, or model seed to load for SAN.
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out-dir", default="results")
     args = ap.parse_args()

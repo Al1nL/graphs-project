@@ -10,8 +10,8 @@
 # force-push, a rename, or a deletion. The fork preserves the objects; the pin says which
 # one. They are complementary.
 #
-# The forks are also the only sane home for our architectural adaptations -- SAN+GRPE and
-# GraphGPS's GRPE attention-bias hook are genuine additions to the published models, and
+# The forks are also the only sane home for our architectural adaptations -- GraphGPS's
+# GRPE attention-bias hook is a genuine addition to the published model, and
 # uncommitted edits in an unversioned clone is the most fragile place they could sit.
 #
 # After forking a new backbone on GitHub, add its URL to config.FORK_URLS and re-run this.

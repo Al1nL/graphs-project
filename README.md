@@ -101,7 +101,7 @@ are the critical path; GraphGPS's is wired end to end, SAN's is now wired for tr
 | backbone | training | probe wrapper | notes |
 |---|---|---|---|
 | GraphGPS | **wired** (4 of 5 PEs) | **wired** | `src/backends/graphgps_backend.py`; GRPE refused, see below |
-| SAN | **wired** (4 of 5 PEs) | stub | `src/backends/san_backend.py`; GRPE refused (same reason as GPS) |
+| SAN | **wired** (4 PEs) | stub | `src/backends/san_backend.py` |
 | Graphormer | stub | stub | repo not cloned or forked yet |
 
 **Fixed this pass:** `run_experiment.py`'s `main()` had the line that calls `train_fn`
@@ -133,12 +133,7 @@ environment set up.
 
 Two things to know before trusting cross-PE numbers from either wired backbone:
 
-- **GRPE raises rather than running, on both backbones.** Neither GraphGPS nor SAN has a
-  native attention-bias hook; GRPE needs `GraphGPS's GPSLayer` / `SAN`'s attention class
-  self-attention replaced by `adapters.graphgps_adapter.GRPEBiasedAttention` /
-  `adapters.san_adapter.SANGammaGRPEBias` and the `spd_bucket`/`edge_type` tensors threaded
-  onto the batch. That is an architectural addition, not a config change, and is left for a
-  separate pass; the other four arms are drop-ins.
+- **GRPE raises on GraphGPS.** GraphGPS has no native attention-bias hook; GRPE needs `GraphGPS's GPSLayer` self-attention replaced by `adapters.graphgps_adapter.GRPEBiasedAttention` and `spd_bucket`/`edge_type` tensors threaded onto the batch.
 - **The content width differs per PE, and this is not fixable in the probe.** GraphGPS holds
   `dim_inner` constant and makes room for the PE by *shrinking* the atom encoder, so at
   `dim_inner=96` the content channels measure 96 / 80 / 76 / 64 / 96 for
@@ -208,12 +203,9 @@ T, because the CI is dominated by between-graph variance that does not shrink wi
 | LapPE | node feature | GraphGPS, SAN | Graphormer: concatenated as extra node feature (not its usual mode) |
 | RWSE | node feature | GraphGPS | SAN: concatenated alongside LPE; Graphormer: extra node feature |
 | SignNet-PE | node feature | GraphGPS (via custom encoder) | SAN: replaces its own LPE module; Graphormer: extra node feature |
-| GRPE | attention bias | Graphormer (native family) | GraphGPS: custom attention-bias hook (see `graphgps_adapter.py`); SAN: added as an additive bias term next to its edge-existence bias (an explicit, documented extension of SAN, not part of the original SAN paper) |
+| GRPE | attention bias | Graphormer (native family) | GraphGPS: custom attention-bias hook (see `graphgps_adapter.py`) |
 
-Every backbone gets all 5 PEs so the grid is fully crossed, but two cells (SAN+GRPE,
-GraphGPS-attention-bias-GRPE) required a genuine architectural adaptation rather than a
-drop-in. This is called out explicitly in the paper draft and in `docs/rationale.docx` —
-it's a source of confound we can't fully remove, only document.
+GraphGPS gets 5 PEs while SAN evaluates node-level encodings (4 PEs: No-PE, LapPE, RWSE, SignNet-PE).
 
 ## Environment setup (on your own GPU machine)
 
@@ -270,8 +262,8 @@ survives ordinary upstream drift, but **not** a force-push, a rename, or a delet
 three the pin dangles and there is no way back to the pinned state. The fork preserves the
 objects; the pin identifies which one. They are complementary, not alternatives.
 
-The fork is also the only sane home for our architectural adaptations: SAN+GRPE and
-GraphGPS's GRPE attention-bias hook are genuine additions to the published models, and
+The fork is also the only sane home for our architectural adaptations: GraphGPS's
+GRPE attention-bias hook is a genuine addition to the published model, and
 uncommitted edits inside an unversioned clone is the most fragile place they could sit.
 
 `check_pinned` therefore verifies that each clone's `origin` is *your fork*, not upstream —

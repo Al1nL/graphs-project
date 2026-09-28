@@ -44,7 +44,7 @@ K_LAP, K_RWSE = 16, 20
 # --------------------------------------------------------------------------- config axes
 def test_grid_is_the_full_product_of_explicit_axes():
     cells = list(grid())
-    assert len(cells) == len(BACKBONES) * len(PES) * len(DATASETS) * 3 == 135
+    assert len(cells) == len(BACKBONES) * len(PES) * len(DATASETS) * 3 == 108
     assert len({c.run_id for c in cells}) == len(cells), "run_ids must be unique"
 
 
@@ -80,9 +80,9 @@ def test_run_config_is_frozen_and_hashes_its_content():
 
 
 def test_run_config_derives_paths_and_per_dataset_max_dist():
-    c = RunConfig("san", "grpe", "pascalvoc-sp", 2, results_dir="out")
-    assert c.run_id == "san_grpe_pascalvoc-sp_seed2"
-    assert c.result_path == os.path.join("out", "san_grpe_pascalvoc-sp_seed2.json")
+    c = RunConfig("san", "rwse", "pascalvoc-sp", 2, results_dir="out")
+    assert c.run_id == "san_rwse_pascalvoc-sp_seed2"
+    assert c.result_path == os.path.join("out", "san_rwse_pascalvoc-sp_seed2.json")
     assert c.resolved_cache_dir == os.path.join("cache", "pascalvoc-sp")
     assert c.metric_name == "macro_f1"
     # from dataset_meta, set from MEASURED diameter percentiles (not the paper average)

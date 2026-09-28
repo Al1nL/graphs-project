@@ -1,34 +1,7 @@
 """
 config.py
 =========
-One config schema with (backbone x pe x dataset x seed) as explicit axes, plus the version
-locking that makes a run reproducible six months later.
-
-Why a schema at all
--------------------
-Before this, a "run" was whatever `run_experiment.py --backbone gps --pe rwse ...` happened
-to assemble from three adapter modules and a YAML/JSON file per backbone, with no single
-object naming what varied. That is fine for one run and unmanageable for 135: nothing
-records which axis combination produced which result file, nothing validates that a
-requested cell exists, and nothing detects that the PE cache on disk was written by an
-older, incompatible version of `compute_pe.py`.
-
-Why version locking
--------------------
-Three things drift underneath this project and each would silently invalidate results:
-
-  1. The three upstream backbones are CLONED, not vendored (see README). GraphGPS, SAN and
-     Graphormer all move. A result produced against an unpinned `main` cannot be
-     reproduced, and worse, half a grid run before an upstream change and half after is
-     not a controlled comparison at all.
-  2. Our own PE computation changes. Fix 3 altered the GRPE bucketing scheme; any cache
-     written before that is structurally different. Silently reusing it would mix two
-     definitions of the same PE across cells.
-  3. Our own analysis code changes. Recorded so a result file can be traced to the commit
-     that produced it.
-
-PINNED_COMMITS is deliberately populated with None rather than "main". A None is a loud,
-checkable "nobody has pinned this yet"; a "main" is a lie that looks like a pin.
+Experiment configuration schema for (backbone x pe x dataset x seed) and repo version locking.
 """
 
 import dataclasses
@@ -40,7 +13,7 @@ from typing import Optional
 
 # --------------------------------------------------------------------------- axes
 BACKBONES = ("gps", "san", "graphormer")
-PES = ("none", "lappe", "rwse", "signnet", "grpe")
+PES = ("none", "lappe", "rwse", "signnet")
 DATASETS = ("peptides-func", "peptides-struct", "pascalvoc-sp")
 DEFAULT_SEEDS = (0, 1, 2)
 
@@ -50,38 +23,17 @@ TASK_METRIC = {
     "pascalvoc-sp": "macro_f1",  # macro-F1, higher better
 }
 
-# Number of test graphs the sensitivity probe samples per run cell (proposal: 256). This is
-# separate from calibrate_target_nodes.py's ladder, which sweeps num_target_nodes (T) on a
-# small fixed set of graphs to pick T itself -- PROBE_N_GRAPHS is how many graphs a REAL
-# grid cell probes once T is already chosen.
 PROBE_N_GRAPHS = 256
 
 # --------------------------------------------------------------------------- versions
-# Bump whenever src/pe/compute_pe.py changes what it writes. The cache manifest records
-# this, and PECache refuses to load a cache whose version differs -- a stale cache is
-# indistinguishable from a fresh one on disk, and mixing two PE definitions across cells of
-# the same grid is the kind of error that produces a plausible, wrong table.
 PE_CACHE_VERSION = 2   # v2: uint8 spd with 255=unreachable, per-graph files, derived buckets
 
-# Upstream repos are cloned as siblings (see README "Environment setup"). Fill these in
-# once, from `git -C ../GraphGPS rev-parse HEAD`, and never run a grid with any of them
-# None for a backbone you are actually using.
 PINNED_COMMITS = {
-    # pinned 2026-07-29, level with rampasek/GraphGPS main at the time of forking
     "gps": "28015707cbab7f8ad72bed0ee872d068ea59c94b",
-    "san": None,          # DevinKreuzer/SAN -- not forked yet
-    "graphormer": None,   # microsoft/Graphormer -- not forked yet
+    "san": None,
+    "graphormer": None,
 }
 
-# We clone OUR FORKS, not upstream directly. A commit SHA is only a reference: it assumes
-# the object still exists on someone else's server, so a pin alone does not survive a
-# force-push, a rename, or a deletion. The fork preserves the objects; the pin identifies
-# which one. They are complementary, not alternatives.
-#
-# The forks are also where our architectural adaptations have to live -- SAN+GRPE and
-# GraphGPS's GRPE attention-bias hook are genuine additions to the published models (see
-# README), and uncommitted edits in an unversioned clone is the most fragile place they
-# could possibly sit.
 FORK_URLS = {
     "gps": "https://github.com/pazflashner/GraphGPS.git",
     "san": "https://github.com/Al1nL/SAN.git",
@@ -158,7 +110,7 @@ def check_pinned(backbone: str, strict: bool = True) -> dict:
               "status": "ok" if (pinned and actual == pinned) else None}
 
     # A clone pointed at upstream rather than our fork carries the same SHA today and
-    # loses it the moment upstream force-pushes -- and it has nowhere to hold our GRPE
+    # loses it the moment upstream force-pushes -- and it has nowhere to hold local
     # adaptations. Same object, wrong provenance.
     if fork and origin and not _same_repo(origin, fork):
         report["status"] = "wrong_origin"

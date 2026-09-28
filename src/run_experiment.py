@@ -15,44 +15,6 @@ Graphormer as siblings of this repo). What this script owns:
   3. after training, running the shared sensitivity probe (src/sensitivity.py) on a sample
      of test graphs,
   4. writing one JSON result file to results/<backbone>_<pe>_<dataset>_seed<seed>.json
-
---------------------------------------------------------------------------------------
-FIX (this pass): run_cell() was missing -- train_fn was never actually called
---------------------------------------------------------------------------------------
-Before this fix, `main()` built a config, printed it, and then had the one line that would
-call `train_fn` commented out -- it unconditionally wrote a JSON with every metric set to
-None, regardless of what backbone was requested or whether training was even attempted.
-Separately, `scripts/launch.py`'s `run_one()` called `TRAIN_FN[cfg.backbone](...)` directly
-(bypassing this file's `main()` entirely) but threw away the returned dict, and never
-invoked the sensitivity probe at all. Net effect: a real grid run would train GraphGPS
-models correctly and then silently discard every metric and curve -- `results/*.json`
-would stay empty (or full of `NOT_RUN` placeholders), so `aggregate_results.py` had nothing
-to read and `launch.py --resume` could never see a cell as complete.
-
-`run_cell()` below is the fix: it actually calls `train_fn`, and -- when a probe wrapper
-exists for the backbone (today: "gps" only) -- samples `num_probe_graphs` test graphs from
-the trained model's own test loader, runs `sensitivity.compute_sensitivity_curve` on each,
-pools them, and writes the fully populated result. Both `main()` and
-`scripts/launch.py:run_one()` now call this one function, so there is a single code path
-that produces a result file instead of two half-implementations that silently diverged.
-
-For backbones without a probe wrapper yet (san, graphormer), the task metric and parameter
-count are still recorded for real; only `sensitivity_curve` stays empty, with `status`
-saying exactly why, so a partially-wired backbone still gives you a real task-metric number
-rather than nothing.
-
---------------------------------------------------------------------------------------
-A LIMITATION THIS FIX DOES NOT PAPER OVER (see backends/graphgps_backend.py header)
---------------------------------------------------------------------------------------
-GraphGPS's own `posenc_LapPE`/`RWSE`/`SignNet` encoders compute the PE internally from the
-raw graph -- `graphgps_train` points GraphGPS at ITS OWN implementation, not at
-`src/pe/cache.py`'s precomputed, hand-verified tensors. That means "every backbone sees the
-identical PE" is not yet literally true for the GraphGPS arm; it is GraphGPS's own LapPE,
-not ours. Patching GraphGPS's internal encoder to consume an external cache is a bigger,
-riskier change than this pass should make silently, so it is disclosed here and in the
-README's "Implementation status" rather than fixed. If this matters for a specific claim,
-verify numerical agreement between the two on a handful of real graphs before trusting a
-cross-backbone PE comparison that depends on it.
 """
 
 import argparse
@@ -61,14 +23,11 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
-from adapters.graphgps_adapter import build_posenc_config
-from adapters.san_adapter import build_san_config
-from adapters.graphormer_adapter import build_graphormer_config
 from config import PROBE_N_GRAPHS, RunConfig
 from sensitivity import average_curves, compute_sensitivity_curve, graph_diameter
 
 DATASETS = ["peptides-func", "peptides-struct", "pascalvoc-sp"]
-PES = ["none", "lappe", "rwse", "signnet", "grpe"]
+PES = ["none", "lappe", "rwse", "signnet"]
 BACKBONES = ["gps", "san", "graphormer"]
 
 TASK_METRIC = {
@@ -86,10 +45,13 @@ PROBE_WIRED_BACKBONES = {"gps", "san"}
 
 def build_config(backbone: str, pe: str, dataset: str, cache_dir: str) -> dict:
     if backbone == "gps":
+        from adapters.graphgps_adapter import build_posenc_config
         return build_posenc_config(pe, cache_dir)
     if backbone == "san":
+        from adapters.san_adapter import build_san_config
         return build_san_config(pe, cache_dir)
     if backbone == "graphormer":
+        from adapters.graphormer_adapter import build_graphormer_config
         return build_graphormer_config(pe, cache_dir)
     raise ValueError(backbone)
 

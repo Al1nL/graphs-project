@@ -1,20 +1,16 @@
 """
 generate_san_configs.py
 ========================
-Writes configs/san/san_<pe>_<dataset>.json for all 5 PEs x 3 datasets, from
+Writes configs/san/san_<pe>_<dataset>.json for all 4 PEs x 3 datasets, from
 backends.san_backend's own PE_SPEC / BASE_NET_PARAMS / TRAIN_PARAMS.
 
 Why generated rather than hand-written
 ---------------------------------------
-The previous configs/san/*.json (from before the real backend existed) hardcoded values
-like `"grpe_num_spd_buckets": 24` that were correct on the day they were written and had no
-mechanism to notice when dataset_meta.SPD_NUM_BUCKETS changed later -- exactly the kind of
-silent drift PE_CACHE_VERSION and the pinned-commit checks elsewhere in this project exist
-to catch. Generating from the single source of truth in san_backend.py means a config file
-can only be as stale as this script, which is cheap to re-run.
+Generating configs from the single source of truth in san_backend.py ensures configs
+remain synchronized across datasets and PE definitions.
 
 Usage:
-    python scripts/generate_san_configs.py            # regenerate all 15
+    python scripts/generate_san_configs.py            # regenerate all 12
     python scripts/generate_san_configs.py --check     # exit 1 if any file would change
 """
 
@@ -43,8 +39,7 @@ def build_one(pe: str, dataset: str) -> dict:
         "pe": pe,
         "dataset": dataset,
         "params": dict(TRAIN_PARAMS),
-        "net_params": {**PE_SPEC[pe], **({"grpe_num_spd_buckets": SPD_NUM_BUCKETS}
-                                          if pe == "grpe" else {})},
+        "net_params": dict(PE_SPEC[pe]),
     }
 
 
@@ -60,6 +55,8 @@ def main():
         if dataset not in BASE_NET_PARAMS:
             continue
         for pe in PES:
+            if pe not in PE_SPEC:
+                continue
             path = os.path.join(OUT_DIR, f"san_{pe}_{dataset}.json")
             new_content = json.dumps(build_one(pe, dataset), indent=2) + "\n"
             old_content = open(path).read() if os.path.exists(path) else None
@@ -75,8 +72,9 @@ def main():
             sys.exit(1)
         print("All SAN configs up to date.")
     else:
+        total = len(BASE_NET_PARAMS) * len(PE_SPEC)
         print(f"Wrote {len(changed)} changed file(s); "
-              f"{15 - len(changed)} were already up to date.")
+              f"{total - len(changed)} were already up to date.")
 
 
 if __name__ == "__main__":

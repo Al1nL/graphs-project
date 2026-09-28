@@ -1,50 +1,7 @@
 """
 cache.py
 ========
-On-disk format for the precomputed PEs: one set of files per graph, memory-mapped on read,
-never all resident at once.
-
-The size problem
-----------------
-PascalVOC-SP is 11,355 graphs averaging 479 nodes. A dense all-pairs array is n^2 per
-graph:
-
-    479^2 x 11,355 = 2.6 GB   as uint8, for ONE dense field
-
-The previous format did `torch.save(split_records, "<split>_pe.pt")` -- a single blob built
-by accumulating every graph in a Python list first. That materialises the whole split in
-RAM to write it, and again to read it. On VOC-SP that is fatal, and on Peptides it is
-merely wasteful.
-
-Three decisions follow.
-
-1. STORE ONLY `spd`. The old format also stored `spd_bucket` and `edge_type_id`, but both
-   are pure functions of `spd` -- the bucket via dataset_meta.spd_bucket_id, the edge type
-   via (spd == 1). Storing them tripled the footprint to ~7.8 GB for nothing, and it was
-   also what made the cache go stale when fix 3 changed the bucketing scheme. Deriving
-   them on read costs a 256-entry lookup-table index (no Python loop) and means the
-   bucketing scheme can now change WITHOUT recomputing the cache.
-
-2. uint8, with 255 reserved for "unreachable". Real distances are far below the ceiling
-   (Peptides diameter ~57, VOC-SP ~27), so nothing is capped -- this keeps fix 3's
-   requirement that raw distances are stored uncapped, while still fitting one byte. The
-   writer asserts rather than silently wrapping.
-
-3. One file per graph per field, written as the graph is processed and read back with
-   `mmap_mode="r"`. Nothing accumulates in memory in either direction; the OS pages in
-   only the graphs actually touched.
-
-Layout:
-
-    cache/<dataset>/
-      manifest.json          format version, counts, dims, observed max diameter
-      <split>/node/0000123.npy   float32 [n, K_LAP + K_RWSE]   LapPE || RWSE
-      <split>/eig/0000123.npy    float32 [K_LAP]               Laplacian eigenvalues
-      <split>/spd/0000123.npy    uint8   [n, n]                255 = unreachable
-
-SignNet consumes the raw eigenvectors, i.e. the LapPE block of the node file -- it is not
-stored separately, because it is the same tensor (the sign-invariance is applied inside the
-learned encoder, not baked into the cache).
+On-disk cache for precomputed positional encodings, supporting memory-mapped access.
 """
 
 import json
@@ -60,8 +17,6 @@ from dataset_meta import SPD_NUM_BUCKETS, spd_bucket_id  # noqa: E402
 UNREACHABLE_U8 = 255
 SPLITS = ("train", "val", "test")
 
-# Lookup table for uint8 distance -> GRPE bucket. Built once; applying it is a single
-# numpy fancy-index over the [n, n] array rather than a per-element Python call.
 _BUCKET_LUT = np.array(
     [spd_bucket_id(d) for d in range(UNREACHABLE_U8)] + [spd_bucket_id(-1)],
     dtype=np.uint8,
@@ -211,15 +166,14 @@ class PECache:
 
 
 def derive_spd_bucket(spd_u8: np.ndarray) -> np.ndarray:
-    """GRPE bias-table index from a uint8 distance matrix. Exposed for tests and adapters."""
+    """Distance bucket index from a uint8 distance matrix."""
     return _BUCKET_LUT[np.asarray(spd_u8)]
 
 
 def estimate_cache_bytes(n_graphs: int, avg_nodes: int, k_lap: int, k_rwse: int) -> dict:
-    """Budget a dataset before computing it. The dense term dominates and is quadratic."""
+    """Budget a dataset cache size before computing it."""
     dense = n_graphs * avg_nodes ** 2                      # uint8
     node = n_graphs * avg_nodes * (k_lap + k_rwse) * 4     # float32
     eig = n_graphs * k_lap * 4
     return {"dense_bytes": dense, "node_bytes": node, "eig_bytes": eig,
-            "total_gb": (dense + node + eig) / 1e9,
-            "note": f"{SPD_NUM_BUCKETS} GRPE buckets derived on read, not stored"}
+            "total_gb": (dense + node + eig) / 1e9}

@@ -1,37 +1,8 @@
 """
 calibration.py
 ==============
-Turns `num_target_nodes` (T) -- the probe's target-node subsampling budget -- from an
-arbitrary constant into an empirically chosen, reportable one.
-
-Why this exists
----------------
-compute_sensitivity_curve samples T target nodes v per graph and measures the exact
-Jacobian norm from every source u to each of them. T therefore controls how much of each
-graph's distance profile we actually observe, and it trades three things off:
-
-  * cost -- linear in T (one batched backward per target),
-  * per-graph curve stability -- bootstrap_over_graphs resamples whole graphs, so each
-    graph needs its OWN rho estimated well enough that measurement noise does not
-    masquerade as between-graph variation (this inflates the CI: conservative, but it
-    wastes real statistical power),
-  * tail coverage -- far buckets are the sparsest, and they are the ones the paper is
-    about.
-
-None of that yields a defensible number by argument. So measure it: sweep T over a ladder,
-watch rho, and stop when rho stops moving relative to the uncertainty we already report.
-
-The nesting property that makes this cheap and clean
------------------------------------------------------
-compute_sensitivity_curve picks targets with `torch.randperm(n, generator=rng)[:T]` where
-rng is seeded by `seed`. Holding `seed` fixed across the sweep therefore makes the target
-sets NESTED PREFIXES: the T=4 set is a subset of the T=8 set, which is a subset of T=16,
-and so on. Consecutive points on the curve differ only by "what did adding more targets
-do", not by "this was a different random draw" -- so the sweep measures convergence rather
-than resampling jitter. Do not vary `seed` across the ladder.
-
-Budgeting: a full ladder of (4, 8, 16, 32, 64, 128) costs sum(ladder) = 252 target-probes
-per graph, i.e. roughly 2x a single probe at T=128. The largest rung dominates.
+Empirically calibrates `num_target_nodes` (T) by sweeping target-node subsampling budgets
+and evaluating convergence of long-range sensitivity metrics.
 """
 
 import time
@@ -155,49 +126,7 @@ def recommend_target_nodes(
     min_bucket: int = 5,
     max_ci_inflation: float = 0.15,
 ) -> Dict:
-    """Smallest T that is unbiased in rho, dense in the tail, AND statistically efficient.
-
-    The densest rung is the reference. T is accepted if all three hold:
-
-      (i)   it and EVERY LARGER RUNG sit within `tol` x (CI half-width at the reference)
-            of the reference rho          -- no subsampling BIAS
-      (ii)  its sparsest distance bucket holds at least `min_bucket` pairs
-                                          -- the far buckets were actually SAMPLED
-      (iii) its own CI is no more than (1 + `max_ci_inflation`) x the reference CI
-                                          -- no wasted statistical POWER
-
-    Why one criterion is not enough
-    -------------------------------
-    (i) alone is close to vacuous, and both demo runs showed it. The bootstrap CI is
-    dominated by BETWEEN-GRAPH variance, which barely shrinks with T, so the acceptance
-    band is set by how heterogeneous the graphs are rather than by how precisely each was
-    measured -- almost any T clears it. That is not a logic error: "subsampling bias is
-    negligible relative to the uncertainty we report" is exactly what (i) certifies, and it
-    is true. It is simply not sufficient.
-
-    (ii) catches the case where rho looks settled at the pooled level while individual far
-    buckets -- the ones carrying the paper's claims -- hold a handful of pairs or none.
-
-    (iii) catches the subtler failure, and is the one that actually bound in practice.
-    bootstrap_over_graphs resamples whole graphs, so if T is small each graph's OWN rho is
-    noisy and that measurement noise is indistinguishable from real between-graph variation.
-    The bootstrap absorbs it into the interval, which stays honest (conservative) but grows.
-    Observed in the demo: CI width 3.39e-2 at T=4 against 2.19e-2 at T=128 -- a 55% wider
-    interval bought by sampling 32x less. rho was unbiased the whole way; the cost was
-    entirely in power. Comparing each rung's CI to the reference's measures that directly.
-
-    Note (iii) is what makes the criterion self-consistent: (i) judges each rung against a
-    band derived from the REFERENCE's CI, so without (iii) a rung could be accepted while
-    its own CI -- the one that would actually appear in the paper -- was far wider than the
-    band it was judged against.
-
-    Also deliberate:
-      * (i) compares to the bootstrap half-width rather than an absolute epsilon; an
-        absolute threshold would just be another arbitrary constant, which is the thing
-        this module exists to eliminate.
-      * (i) requires all larger rungs to hold, not only this one, so a curve that happens
-        to cross the reference on its way elsewhere is not mistaken for convergence.
-    """
+    """Select the smallest target node count T meeting stability, tail density, and CI bounds."""
     if not rows:
         raise ValueError("no rows to analyse")
     rows = sorted(rows, key=lambda r: r["T"])
@@ -313,7 +242,7 @@ def recommend_target_nodes(
 
 
 def report_sentence(rec: Dict, rows: List[Dict], d_min: int, d_max: int) -> str:
-    """The claim this whole module exists to license, phrased for the paper."""
+    """Format calibration result summary sentence."""
     ref = max(rows, key=lambda r: r["T"])
     n_graphs = ref["n_graphs"]
     if not rec["converged"]:
