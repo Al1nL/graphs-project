@@ -36,11 +36,13 @@ Design: 3 backbones (GraphGPS, SAN, Graphormer) × 5 PEs (No-PE, LapPE, RWSE, Si
 - `ρ_rel` = same ratio over the **relative** window d/diam(G) > 0.5 (bins 6-10 of 10) — the
   cross-dataset-comparable axis, what §5/all cross-backbone claims in the paper rank on.
 - Bootstrap CIs are graph-clustered (resample graph identity, keep seed-copies together).
-- **Known bug (found in review, not yet fixed as of last edit — check before trusting stars in
-  Table 3/`results_rho.tex`)**: `aggregate_results.py`'s `rho_seed_std` is the seed-std of
-  *absolute* ρ, not ρ_rel. `make_paper_tables.py`'s `significant()` uses it as the noise floor
-  for ρ_rel's two-part significance rule (CI-disjoint AND exceeds seed-std) — wrong statistic.
-  Fix: compute a real `rho_rel_seed_std` in `aggregate_results.py` (per-seed ρ_rel, not ρ).
+- **Bug fixed (external review, Sep 2026)**: `aggregate_results.py`'s `rho_seed_std` was the
+  seed-std of *absolute* ρ, not ρ_rel, but `make_paper_tables.py`'s `significant()` used it
+  as the noise floor for ρ_rel's two-part significance rule (CI-disjoint AND exceeds
+  seed-std) — wrong statistic. Fixed by adding a real `rho_rel_seed_std` to
+  `aggregate_results.py` (per-seed ρ_rel, not ρ); see `make_paper_tables.py:significant()`'s
+  docstring. Recomputing flipped exactly one cell in the published table: SAN/
+  Peptides-func/LapPE gained a star (correct floor 0.116, not the old 0.135).
 
 ## CRITICAL DATA FACT — Graphormer's probe sample size is 10, not 256
 Verified directly from JSONs (`sensitivity_curves_per_graph` length):
@@ -101,10 +103,10 @@ path, no retraining needed — this is a probe-only rerun).
 ## Scripts (all in `scripts/`, all committed on `results-all`)
 - `collect_cross_backbone_results.py` — pulls every branch's `results/*.json` via `git show`.
 - `aggregate_results.py` — pre-existing repo script; computes `summary_table.csv`, plots raw/norm
-  curves, criterion-b Spearman correlations. **Has the rho_seed_std bug noted above.**
+  curves, criterion-b Spearman correlations. **Had the rho_seed_std bug noted above; fixed.**
 - `make_paper_tables.py` — generates the `results_*.tex` fragments the paper `\input`s
   (`results_tables`=metric, `results_rho`=ρ_rel, `results_critb`=criterion b, `results_headline`
-  =9-row W/sign summary). Contains `significant()`, the two-part star rule (has the bug above).
+  =9-row W/sign summary). Contains `significant()`, the two-part star rule (had the bug above; fixed).
 - `make_ranking_figures.py` — combined 3-panel rank heatmap (`figures/ranking_heatmap_combined.png`).
   Cell text: bold rank number (large) + ρ_rel as % (small, non-bold) below it — this exact sizing
   was tuned empirically (`get_window_extent`) because 5-PE-wide columns are only ~0.275in each;
