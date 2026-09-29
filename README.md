@@ -72,7 +72,7 @@ graphs-project/
 │   ├── README.md                 <- which of these three directories code ACTUALLY reads
 │   ├── graphgps/                 <- 15 YAML files, decorative (see configs/README.md)
 │   ├── san/                      <- 15 JSON configs, LIVE -- san_backend.py reads these
-│   └── graphormer/                <- 15 JSON configs, decorative (backend still a stub)
+│   └── graphormer/                <- 10 JSON configs, decorative (backend still a stub)
 ├── docs/
 │   └── analysis-plan.md          <- amended success criteria + pre-registered ρ windows.
 │                                    Dated BEFORE any results exist; read this first.
@@ -231,7 +231,8 @@ bash scripts/setup_upstream.sh          # clones your forks as siblings, adds an
 #    pins fairseq + its own CUDA ops). Do NOT try to share one env across all three.
 conda env create -f envs/graphgps_env.yml
 conda env create -f envs/san_env.yml
-conda env create -f envs/graphormer_env.yml
+# envs/graphormer_env.yml doesn't exist yet on this branch -- Graphormer is still a stub
+# here (see "Implementation status"); it ships once that backend is wired.
 
 # 3. Pin the commit. setup_upstream.sh prints the exact line to paste into
 #    config.PINNED_COMMITS for any backbone that is cloned but not yet pinned.

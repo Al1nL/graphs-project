@@ -1,0 +1,254 @@
+# Conda environment for the GraphGPS arm of the grid.
+#
+#     conda env create -f envs/graphgps_env.yml
+#     conda activate graphgps_env
+#     cd ../GraphGPS && pip install -e .        # registers the `graphgps` package
+#
+# ---------------------------------------------------------------------------------------
+# ON A CLUSTER, REDIRECT THE CACHES FIRST -- this env does not fit in a student home dir,
+# and neither do the caches used to build it.
+# ---------------------------------------------------------------------------------------
+# Installing conda somewhere roomy is NOT sufficient. pip caches to $HOME/.cache/pip and
+# conda to ~/.conda/pkgs no matter where the installation lives, so a small home quota
+# fails the build partway through, after tens of minutes, with an error that mentions only
+# the cache path:
+#
+#     WARNING: Building wheel for axial-positional-embedding failed:
+#     [Errno 122] Disk quota exceeded: '/…/pazflashner/.cache/pip/wheels'
+#     CondaEnvException: Pip failed
+#
+# Measured on TAU's nova, where the two filesystems differ by four orders of magnitude:
+#
+#     $HOME        goliath:/homecc/stud_math      1055M used / 1900M quota
+#     /home/yandex netapp1:/Netapp5_yandex           1M used / 16384G quota
+#
+# So before creating the env (add these to your shell rc to make it stick):
+#
+#     export PIP_CACHE_DIR=/home/yandex/<course>/<user>/.cache/pip
+#     export CONDA_PKGS_DIRS=/home/yandex/<course>/<user>/.conda/pkgs
+#     export TMPDIR=/home/yandex/<course>/<user>/tmp
+#
+# The env itself is 6-8 GB and the package cache is comparable, so budget ~15 GB.
+#
+# The env is named graphgps_env, NOT graphgps: scripts/slurm/run_grid.slurm activates
+# `graphgps_env` by that exact name, and envs/san_env.yml already sets the <backbone>_env
+# convention. Upstream's own README uses plain `graphgps`; following it here would make
+# every array task die on `conda activate`.
+#
+# This is GraphGPS's OWN documented recipe (README "Python environment setup with Conda"),
+# read out of the pinned clone at 2801570 rather than reconstructed from memory, with only
+# the additions this harness needs on top. Keep it that way: the pin in
+# src/config.PINNED_COMMITS exists so the published model is what actually runs, and an
+# environment that drifts from the one upstream tested against defeats the pin as surely
+# as moving the commit would.
+#
+# Do NOT install this alongside envs/san_env.yml. They disagree on python, pytorch, CUDA
+# and PyG, and SAN additionally needs DGL. One conda env per backbone, always.
+#
+# ---------------------------------------------------------------------------------------
+# CUDA: pytorch-cuda=11.7 pairs with pytorch 1.13, which is what GraphGPS pins. If the
+# cluster's driver cannot take cu117 this is the line to change -- but changing it means
+# also rebuilding pyg-lib from the matching wheel index below, and re-checking that
+# torch-scatter resolves. Verify with `python -c "import torch; print(torch.cuda.is_available())"`
+# before queueing a grid, not after.
+# ---------------------------------------------------------------------------------------
+
+name: graphgps_env
+
+channels:
+  - pytorch
+  - nvidia
+  - pyg
+  - conda-forge
+  # `defaults` is deliberately ABSENT. It resolved 16 packages out of Anaconda's own
+  # repo, whose terms require a paid licence for organisations above a headcount a
+  # university clears easily. conda-forge covers every one of them.
+
+dependencies:
+  - python=3.10
+  - pip
+
+  # setuptools 81 REMOVED pkg_resources, which 2022-era packages still import at module
+  # scope. pytorch-lightning 1.9.5 is the one that surfaces it here --
+  # lightning_fabric/__init__.py does `__import__("pkg_resources").declare_namespace(...)`
+  # -- and the failure is invisible because PyG's graphgym wraps the import in try/except
+  # and only warns:
+  #
+  #     UserWarning: Please install 'pytorch_lightning' ...
+  #
+  # i.e. it reports the package as MISSING when it is installed and merely unimportable.
+  # Pinned rather than dropping lightning, because pkg_resources is a common assumption in
+  # code of this vintage and this protects the rest of the pinned set too.
+  - setuptools<81
+
+  # --- upstream's pinned core. Versions are GraphGPS's, not ours.
+  - pytorch=1.13
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=11.7
+
+  # MKL MUST BE HELD BELOW 2024. pytorch 1.13's libtorch_cpu.so links Intel's ittnotify
+  # symbol iJIT_NotifyEvent, which MKL 2024 removed. Nothing constrains this from pytorch's
+  # side, so a fresh solve happily takes the newest MKL (2025.3.1 here) and the env builds
+  # cleanly, then dies on the very first `import torch`:
+  #
+  #     ImportError: .../torch/lib/libtorch_cpu.so: undefined symbol: iJIT_NotifyEvent
+  #
+  # Note this is a CPU-side symbol -- it has nothing to do with CUDA, and a correct
+  # cuda11.7 pytorch build fails exactly the same way, which makes it easy to misread as
+  # the CUDA problem it is not.
+  - mkl<2024
+
+  # DO NOT REMOVE, AND DO NOT ASSUME pytorch-cuda ABOVE IS ENOUGH. Without this line the
+  # solve is still SATISFIABLE and still silently WRONG: it pulls `cpuonly` plus
+  # `pytorch-mutex=1.0=cpu` and resolves pytorch to `py3.10_cpu_0` -- CUDA runtime
+  # libraries present, CPU pytorch on top of them -- while torch-scatter/sparse/cluster
+  # still come from the pyg channel as cu117 builds. Verified by dry-run, not guessed.
+  # The failure is nasty because nothing errors: torch.cuda.is_available() returns False
+  # and a grid trains on CPU at a fraction of the speed until someone notices.
+  - pytorch-mutex=1.0=cuda
+  - pyg=2.2
+
+  # The pyg 2.2 companion libraries, named EXPLICITLY rather than left to the `pyg`
+  # metapackage to drag in. Leaving them implicit is not theoretical: a real install of an
+  # earlier version of this file resolved without torch_sparse, and the failure is about as
+  # far from the cause as it gets --
+  #
+  #     >>> import graphgps
+  #     File ".../torch_geometric/data/data.py", line 20, in <module>
+  #         from torch_sparse import SparseTensor
+  #     ModuleNotFoundError: No module named 'torch_sparse'
+  #
+  # PyG 2.2 imports torch_sparse at MODULE level in data.py, so without it
+  # `import torch_geometric` fails outright -- nothing in this project can run, and the
+  # traceback points at graphgps, which is not where the problem is.
+  #
+  # torch_scatter is separately load-bearing on our own import path:
+  # graphgps/encoder/signnet_pos_encoder.py and layer/gatedgcn_layer.py both do
+  # `from torch_scatter import scatter` at module level.
+  - pytorch-sparse
+  - pytorch-scatter
+  - pytorch-cluster
+
+  - fsspec
+
+  # RDKit is REQUIRED for peptides-func and peptides-struct, which is not obvious from
+  # grepping GraphGPS for "rdkit" -- the only direct import there is in the PCQM4Mv2
+  # module, which this study never loads. The dependency is one level down:
+  #
+  #   graphgps/loader/dataset/peptides_functional.py
+  #     from ogb.utils import smiles2graph     <- module level
+  #       ogb.utils.mol                        <- imports rdkit
+  #
+  # Without it, create_loader() dies partway into building the dataset with
+  # "ImportError: cannot import name 'smiles2graph' from 'ogb.utils'", which names
+  # neither rdkit nor the loader that needed it.
+  #
+  # openbabel, which upstream's README installs in the same line, stays out: it is only
+  # used by the PCQM4Mv2 path.
+  - rdkit
+
+  # --- shared-harness deps (src/pe, src/sensitivity.py, src/run_experiment.py). The probe
+  # runs in THIS env, in-process against the trained model, so they belong here and not
+  # only in requirements.txt.
+  # NUMPY MUST STAY BELOW 2. pytorch 1.13 is compiled against the NumPy 1.x C API, and
+  # under NumPy 2 its interop layer fails to initialise:
+  #
+  #     UserWarning: Failed to initialize NumPy: _ARRAY_API not found
+  #     A module that was compiled using NumPy 1.x cannot be run in NumPy 2.2.6
+  #
+  # `import torch` still SUCCEEDS, which is what makes this dangerous -- it degrades
+  # rather than fails. torch.from_numpy() and Tensor.numpy() are what break, and
+  # backends/graphgps_pe_cache.py calls torch.from_numpy on every graph it feeds to
+  # GraphGPS, so the PE injection is directly downstream of this.
+  - numpy<2
+  - scipy
+  - networkx
+  - pandas
+  - pyyaml
+  - tqdm
+  # matplotlib-base, not matplotlib: the latter pulls pyqt and the whole Qt stack
+  # (qtbase, qtdeclarative, qtwebchannel, qtsvg, qttools...) for a GUI backend that a
+  # headless compute node cannot use anyway. scripts/aggregate_results.py only ever
+  # writes files, so Agg is sufficient.
+  - matplotlib-base
+  # <1.6: GraphGPS's regression logger calls mean_squared_error(..., squared=False),
+  # deprecated in 1.4 and removed in 1.6. Unpinned it resolved to >=1.6 and every
+  # peptides-struct run died at the end of epoch 0. backends/graphgps_backend
+  # .patch_sklearn_squared_kwarg keeps an already-built env working; this is the fix for
+  # fresh ones.
+  - scikit-learn<1.6
+  - joblib
+
+  - pip:
+      # pyg-lib's wheel index is keyed to the exact torch+CUDA build above. If you change
+      # pytorch-cuda, change this URL to match or the install silently resolves to nothing.
+      - --find-links https://data.pyg.org/whl/torch-1.13.0+cu117.html
+      - pyg-lib
+
+      # Upstream's README says `pip install pytorch-lightning torchmetrics` unpinned,
+      # which was correct in 2022 and is a trap now: both went through a major version
+      # that removed APIs the torch-1.13-era code uses. GraphGPS itself never imports
+      # pytorch_lightning -- it is PyG 2.2's own graphgym that does -- so an incompatible
+      # version breaks on `import torch_geometric.graphgym`, a long way from anything
+      # that looks related. Capped below the majors rather than left to resolve.
+      - pytorch-lightning<2.0
+      - torchmetrics<1.0
+
+      - yacs
+      - tensorboardX
+      - ogb
+
+      # performer-pytorch is NOT optional despite GPS not using Performer attention by
+      # default: graphgps/layer/gps_layer.py imports SelfAttention from it at module
+      # level, so it is required just to import the package.
+      #
+      # ITS TRANSITIVE DEPS MUST BE PINNED, AND THIS IS THE SUBTLEST TRAP IN THIS FILE.
+      # performer-pytorch 1.1.4 itself only asks for torch>=1.6, which conda's 1.13.1
+      # satisfies. But it depends on axial-positional-embedding and local-attention
+      # UNBOUNDED, and current releases of both require torch>=2.0. pip resolves them to
+      # latest, sees the constraint unmet, and satisfies it the only way it can: by
+      # installing a PyPI torch OVER conda's, replacing the CUDA 1.13.1 build with 2.13.0.
+      #
+      # Nothing errors during the install. It surfaces later as:
+      #
+      #     OSError: .../torch_sparse/_version_cuda.so: undefined symbol:
+      #     _ZN3c1017RegisterOperatorsD1Ev
+      #
+      # -- i.e. c10::RegisterOperators::~RegisterOperators(), a libtorch ABI symbol that
+      # exists in 1.13 and not in 2.x. Every conda companion library (pyg, sparse,
+      # scatter, cluster) is compiled against 1.13 and none can load. `conda list` shows
+      # the giveaway: `torch 2.13.0 pypi_0 pypi` sitting next to `pytorch-sparse
+      # ..._torch_1.13.0_cu117 pyg`.
+      #
+      # Versions below verified against their published metadata: local-attention 1.4.4
+      # requires plain `torch` with no floor, axial-positional-embedding 0.2.1 and einops
+      # 0.6.1 declare no dependencies at all, and all three satisfy performer-pytorch's
+      # own minimums (>=1.1.1, >=0.1.0, >=0.3). Do not relax these to ranges.
+      - einops==0.6.1
+      - axial-positional-embedding==0.2.1
+      - local-attention==1.4.4
+      - performer-pytorch==1.1.4
+
+      # Imported at module scope by graphgps/logger.py. cfg.wandb.use is forced False in
+      # backends/graphgps_backend.py (the launcher owns logging), but the import still has
+      # to resolve.
+      - wandb
+
+# ---------------------------------------------------------------------------------------
+# DELIBERATELY OMITTED -- all three are optional on our path, and each is a real install
+# burden, so they are left out rather than carried "just in case":
+#
+#   apex               guarded by try/except in graphgps/layer/performer_layer.py; only
+#                      gates fp16 Performer attention, which GPS's LRGB configs do not use.
+#   fast_transformers  imported INSIDE causal_linear_attention(); reachable only via causal
+#                      linear attention, which GPS does not call.
+#   openbabel          upstream lists it alongside rdkit for OGB-LSC PCQM4Mv2. Unlike
+#                      rdkit -- which turned out to be REQUIRED, see its entry above --
+#                      openbabel is only reached by the PCQM4Mv2 path, which this study
+#                      does not load. Add it back only if the study grows such an arm.
+#
+# If one of these ever surfaces as an ImportError, that means the import path changed --
+# check what pulled it in before adding the package, because it may mean a code path was
+# entered that this study did not intend to enter.
+# ---------------------------------------------------------------------------------------
