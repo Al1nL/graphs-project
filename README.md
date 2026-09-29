@@ -11,9 +11,9 @@ and (b) a shared, backbone-agnostic long-range sensitivity probe.
 > have been run against real graphs. GraphGPS's probe wrapper is wired; SAN's is not yet.
 > The orchestration bug that used to make a real grid run silently discard every metric
 > (train_fn was never called from `run_experiment.main()`; `launch.py` called it but threw
-> the result away) is fixed — see "Implementation status". No model has been trained to
-> completion here and `results/` is empty; there is no GPU in this environment, so every
-> number in the paper is still ahead of us.
+> the result away) is fixed — see "Implementation status". The GraphGPS arm has since been
+> trained to completion (36/36 cells; see `docs/findings_gps.txt`), so `results/` is not
+> empty — but SAN and Graphormer are not part of this branch's results.
 > Import paths for the not-yet-cloned Graphormer backend were checked by hand against its
 > documented API as of early 2026 — re-verify against the exact commit you clone, since
 > upstream repos drift.
@@ -24,7 +24,8 @@ The professor's comment was: don't let a PE's apparent effect be a GraphGPS-spec
 artifact, and don't let a dataset's result be a Peptides-func-specific artifact. So we now
 vary two axes independently:
 
-- **Backbone axis** (architecturally distinct, see `docs/rationale.docx` for the reasoning):
+- **Backbone axis** (architecturally distinct; the full reasoning was meant to live in
+  `docs/rationale.docx`, but that file has not been added to this repo):
   1. **GraphGPS** (hybrid MPNN + Transformer) — primary backbone, unchanged from the proposal.
   2. **SAN** (Spectral Attention Network) — full/sparse attention with a dedicated *learned*
      spectral PE module; no message-passing branch.
@@ -82,13 +83,13 @@ graphs-project/
 │   ├── calibrate_target_nodes.py <- one-off convergence check for the probe's T
 │   ├── generate_san_configs.py   <- regenerates configs/san/*.json from san_backend.py's
 │   │                                own PE_SPEC/BASE_NET_PARAMS/TRAIN_PARAMS
-│   ├── run_all.sh                <- superseded by launch.py; kept for reference
 │   ├── aggregate_results.py      <- Table 1 + figures; ρ is the primary statistic
 │   └── slurm/                    <- TAU CS cluster job scripts, see scripts/slurm/README.md
 ├── raw_data/                     <- gitignored, 5.2 GB. LRGB downloads; see setup step 4.
 ├── cache/                        <- gitignored, 5.0 GB. Built PE caches, one file per graph.
-└── results/                      <- EMPTY, and not in a fresh clone; run_experiment.py
-                                     creates it. Filled after real runs.
+└── results/                      <- 36/36 GraphGPS cells (see docs/findings_gps.txt); no
+                                     SAN or Graphormer results on this branch. Not in a
+                                     fresh clone; run_experiment.py creates it.
 ```
 
 ## Implementation status
@@ -179,7 +180,7 @@ amended proposal success criteria are in `docs/analysis-plan.md`.
 
 - **absolute `d`**, per-dataset windows — primary *within* a dataset; the axis
   over-squashing theory is stated in. Windows are **(26, 80)** for Peptides and
-  **(14, 36)** for PascalVOC-SP.
+  **(14, 28)** for PascalVOC-SP.
 - **`max_dist` = the dataset's full diameter** — **159** for Peptides, **54** for
   PascalVOC-SP. This is a *measurement* cap, not a reporting one: measuring wider fills the
   relative tail bins of the largest graphs, while `long_range_fraction` ignores every bucket
@@ -231,8 +232,9 @@ T, because the CI is dominated by between-graph variance that does not shrink wi
 
 Every backbone gets all 5 PEs so the grid is fully crossed, but two cells (SAN+GRPE,
 GraphGPS-attention-bias-GRPE) required a genuine architectural adaptation rather than a
-drop-in. This is called out explicitly in the paper draft and in `docs/rationale.docx` —
-it's a source of confound we can't fully remove, only document.
+drop-in. This is called out explicitly in the paper draft — it's a source of confound we can't
+fully remove, only document (a fuller writeup was meant for `docs/rationale.docx`, which
+has not been added to this repo).
 
 ## Environment setup (on your own GPU machine)
 
@@ -248,7 +250,8 @@ bash scripts/setup_upstream.sh          # clones your forks as siblings, adds an
 #    pins fairseq + its own CUDA ops). Do NOT try to share one env across all three.
 conda env create -f envs/graphgps_env.yml
 conda env create -f envs/san_env.yml
-conda env create -f envs/graphormer_env.yml
+# envs/graphormer_env.yml doesn't exist yet on this branch -- Graphormer is still a stub
+# here (see "Implementation status"); it ships once that backend is wired.
 
 # 3. Pin the commit. setup_upstream.sh prints the exact line to paste into
 #    config.PINNED_COMMITS for any backbone that is cloned but not yet pinned.
@@ -340,7 +343,8 @@ and unreachable pairs.
 ## Compute budget reality check
 
 Full grid = 3 backbones × 5 PEs × 3 datasets × 3 seeds = **135 runs**. If that's not
-feasible before the deadline, the fallback (documented in `docs/rationale.docx`) is:
+feasible before the deadline, the fallback (`docs/rationale.docx` was meant to hold this,
+but has not been added to this repo) is:
 drop to 1 seed for the two new backbones and keep 3 seeds only for GraphGPS (the primary
 backbone), and/or drop PascalVOC-SP to a 20% node-subsampled variant for the SAN arm only
 (SAN's full attention is O(n²) and PascalVOC-SP graphs average ~480 nodes).

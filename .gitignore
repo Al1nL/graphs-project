@@ -38,7 +38,7 @@ venv/
 .ipynb_checkpoints/
 .DS_Store
 
-# Cluster job output (scripts/slurm/, run_job.sh) and training checkpoints.
+# Cluster job output (scripts/slurm/) and training checkpoints.
 logs/
 *.pt
 *.tmp
