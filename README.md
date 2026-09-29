@@ -83,7 +83,6 @@ graphs-project/
 │   ├── calibrate_target_nodes.py <- one-off convergence check for the probe's T
 │   ├── generate_san_configs.py   <- regenerates configs/san/*.json from san_backend.py's
 │   │                                own PE_SPEC/BASE_NET_PARAMS/TRAIN_PARAMS
-│   ├── run_all.sh                <- superseded by launch.py; kept for reference
 │   ├── aggregate_results.py      <- Table 1 + figures; ρ is the primary statistic
 │   └── slurm/                    <- TAU CS cluster job scripts, see scripts/slurm/README.md
 ├── raw_data/                     <- gitignored, 5.2 GB. LRGB downloads; see setup step 4.
