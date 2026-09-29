@@ -8,9 +8,13 @@ and (b) a shared, backbone-agnostic long-range sensitivity probe.
 
 > **Status note:** the real LRGB data is downloaded and all three PE caches are built and
 > verified; the probe, the calibration tool and the GraphGPS integration have been run
-> against real graphs. What has *not* happened is a training run — no model has been
-> trained, `results/` is empty, and there is no GPU here, so every number in the paper is
-> still ahead of us. See "Implementation status" for what is wired and what is a stub.
+> against real graphs. The Graphormer arm is also trained to completion — 30/30 cells
+> (5 PEs × 2 datasets × 3 seeds) — with real results in `results/graphormer_*.json`.
+> PascalVOC-SP is out of scope for Graphormer: it's a node-classification task, and
+> Graphormer's stock `graph_prediction` readout only reads out the graph-token position, so
+> predicting a per-node label needs a real architectural change, not a PE-arm swap (see
+> `src/backends/graphormer_backend.py`). See "Implementation status" for what is wired and
+> what is still a stub (SAN training/probe).
 > Import paths for the not-yet-cloned backbones were checked by hand against each library's
 > documented API as of early 2026 — re-verify against the exact commit you clone, since
 > upstream repos drift.
@@ -21,7 +25,8 @@ The professor's comment was: don't let a PE's apparent effect be a GraphGPS-spec
 artifact, and don't let a dataset's result be a Peptides-func-specific artifact. So we now
 vary two axes independently:
 
-- **Backbone axis** (architecturally distinct, see `docs/rationale.docx` for the reasoning):
+- **Backbone axis** (architecturally distinct; the full reasoning was meant to live in
+  `docs/rationale.docx`, but that file has not been added to this repo):
   1. **GraphGPS** (hybrid MPNN + Transformer) — primary backbone, unchanged from the proposal.
   2. **SAN** (Spectral Attention Network) — full/sparse attention with a dedicated *learned*
      spectral PE module; no message-passing branch.
@@ -52,8 +57,11 @@ graphs-project/
 │   │   ├── san_adapter.py        <- maps PE tensors -> SAN's LPE input format
 │   │   └── graphormer_adapter.py <- maps PE tensors -> Graphormer spatial_pos/edge_input/attn-bias
 │   ├── backends/
-│   │   └── graphgps_backend.py   <- REAL integration: drives GraphGPS's own train loop, and
-│   │                                wraps a trained GPSModel for the Jacobian probe
+│   │   ├── graphgps_backend.py   <- REAL integration: drives GraphGPS's own train loop, and
+│   │   │                            wraps a trained GPSModel for the Jacobian probe
+│   │   └── graphormer_backend.py <- REAL integration: drives Graphormer's own train loop,
+│   │                                trained 30/30 cells; PascalVOC-SP out of scope (see
+│   │                                "Implementation status")
 │   ├── config.py                 <- run schema (backbone x pe x dataset x seed) + version locking
 │   ├── dataset_meta.py           <- per-dataset caps, ρ windows, GRPE bucketing
 │   ├── calibration.py            <- target-node budget sweep + decision rule
@@ -73,7 +81,6 @@ graphs-project/
 ├── scripts/
 │   ├── launch.py                 <- THE entry point: grid, seeding, pre-flight, CSV/W&B
 │   ├── calibrate_target_nodes.py <- one-off convergence check for the probe's T
-│   ├── run_all.sh                <- superseded by launch.py; kept for reference
 │   └── aggregate_results.py      <- Table 1 + figures; ρ is the primary statistic
 ├── raw_data/                     <- gitignored, 5.2 GB. LRGB downloads; see setup step 4.
 ├── cache/                        <- gitignored, 5.0 GB. Built PE caches, one file per graph.
@@ -84,14 +91,14 @@ graphs-project/
 ## Implementation status
 
 The shared machinery — PE computation and cache, the sensitivity probe, calibration,
-aggregation, the launcher — is complete and tested. The per-backbone training integrations
-are not, and that is the critical path:
+aggregation, the launcher — is complete and tested. SAN's training/probe integration is
+the remaining critical path:
 
 | backbone | training | probe wrapper | notes |
 |---|---|---|---|
 | GraphGPS | **wired** (4 of 5 PEs) | **wired** | `src/backends/graphgps_backend.py`; GRPE refused, see below |
 | SAN | stub | stub | repo not cloned or forked yet |
-| Graphormer | stub | stub | repo not cloned or forked yet |
+| Graphormer | **wired**, trained 30/30 cells (5 PEs × 2 datasets) | **wired** | `src/backends/graphormer_backend.py`; PascalVOC-SP out of scope, see status note above |
 
 `graphgps_train` drives GraphGPS's **own** run loop, starting from its tuned reference YAML
 for the dataset and overriding only the PE block, so every arm differs in exactly one thing.
@@ -178,8 +185,9 @@ T, because the CI is dominated by between-graph variance that does not shrink wi
 
 Every backbone gets all 5 PEs so the grid is fully crossed, but two cells (SAN+GRPE,
 GraphGPS-attention-bias-GRPE) required a genuine architectural adaptation rather than a
-drop-in. This is called out explicitly in the paper draft and in `docs/rationale.docx` —
-it's a source of confound we can't fully remove, only document.
+drop-in. This is called out explicitly in the paper draft — it's a source of confound we can't
+fully remove, only document (a fuller writeup was meant for `docs/rationale.docx`, which
+has not been added to this repo).
 
 ## Environment setup (on your own GPU machine)
 
@@ -188,7 +196,7 @@ it's a source of confound we can't fully remove, only document.
 bash scripts/setup_upstream.sh          # clones your forks as siblings, adds an
                                         # `upstream` remote, checks out the pinned commit
 # Do NOT `git clone` upstream directly -- pre-flight rejects it (see "Version locking").
-# Status today: gps forked and pinned; san and graphormer still need forking.
+# Status today: gps and graphormer forked and pinned; san still needs forking.
 
 # 2. Create one env per backbone (their pinned dependency sets conflict with each other -
 #    GraphGPS wants PyG>=2.0 + torch 1.9-2.x, SAN pins an older PyG/DGL combo, Graphormer
@@ -248,7 +256,7 @@ history. HTTPS and SSH remote forms are treated as equivalent.
 |---|---|---|
 | GraphGPS | `pazflashner/GraphGPS` | `28015707` |
 | SAN | not yet | — |
-| Graphormer | not yet | — |
+| Graphormer | `LioraYacob-Uni/Graphormer` | `a04573c` |
 
 **All teammates must pin the same forks.** If two people pin different ones, their results
 are not comparable and the grid silently stops being a controlled experiment.
@@ -287,7 +295,8 @@ and unreachable pairs.
 ## Compute budget reality check
 
 Full grid = 3 backbones × 5 PEs × 3 datasets × 3 seeds = **135 runs**. If that's not
-feasible before the deadline, the fallback (documented in `docs/rationale.docx`) is:
+feasible before the deadline, the fallback (`docs/rationale.docx` was meant to hold this,
+but has not been added to this repo) is:
 drop to 1 seed for the two new backbones and keep 3 seeds only for GraphGPS (the primary
 backbone), and/or drop PascalVOC-SP to a 20% node-subsampled variant for the SAN arm only
 (SAN's full attention is O(n²) and PascalVOC-SP graphs average ~480 nodes).

@@ -1,7 +1,7 @@
 """
 aggregate_results.py
 =====================
-Run this AFTER scripts/run_all.sh has produced real (non-placeholder) results/*.json files.
+Run this AFTER scripts/launch.py has produced real (non-placeholder) results/*.json files.
 
     python scripts/aggregate_results.py [--d-min N] [--d-max N] [--weight-by-count]
 
@@ -233,7 +233,7 @@ def build_summary_table(records, n_boot, weight_by_count, out_dir="results"):
 
     if not rows:
         print("No completed runs found (all metric_value are null placeholders and no "
-              "sensitivity curves present). Run scripts/run_all.sh with real backbones first.")
+              "sensitivity curves present). Run scripts/launch.py with real backbones first.")
         return None
 
     df = pd.DataFrame(rows).sort_values(["dataset", "backbone", "rho"], ascending=[1, 1, 0])

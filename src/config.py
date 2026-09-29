@@ -64,7 +64,7 @@ PINNED_COMMITS = {
     # pinned 2026-07-29, level with rampasek/GraphGPS main at the time of forking
     "gps": "28015707cbab7f8ad72bed0ee872d068ea59c94b",
     "san": None,          # DevinKreuzer/SAN -- not forked yet
-    "graphormer": "a04573c40705fb174db261bb746a8258d00992f5",   # microsoft/Graphormer -- not forked yet
+    "graphormer": "a04573c40705fb174db261bb746a8258d00992f5",   # pinned 2026-09-09, forked as LioraYacob-Uni/Graphormer (see FORK_URLS)
 }
 
 # We clone OUR FORKS, not upstream directly. A commit SHA is only a reference: it assumes

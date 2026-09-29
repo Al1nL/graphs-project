@@ -15,11 +15,10 @@ Graphormer as siblings of this repo). What this script owns:
      of test graphs,
   4. writing one JSON result file to results/<backbone>_<pe>_<dataset>_seed<seed>.json
 
-NOTE: the calls to each backbone's own train/eval functions (`graphgps_train`,
-`san_train`, `graphormer_train`) are import stubs -- point them at the actual entry points
-in the cloned repos (e.g. GraphGPS's `main.py:run_loop_settings`, SAN's `main_SAN.py`,
-Graphormer's `graphormer/train.py`) once those repos are on disk. Left as stubs here
-because those repos are not vendored into this harness.
+NOTE: `graphgps_train` and `graphormer_train` delegate to real backend modules
+(`backends/graphgps_backend.py`, `backends/graphormer_backend.py`) that drive each
+backbone's own training entry point. `san_train` is still an import stub -- SAN's repo
+isn't wired into this harness yet; see "Implementation status" in the README.
 """
 
 import argparse
