@@ -6,17 +6,16 @@ reimplementation of GraphGPS / SAN / Graphormer: it wraps the three official cod
 adds (a) a shared PE-precomputation module so every backbone sees the *same* PE definitions,
 and (b) a shared, backbone-agnostic long-range sensitivity probe.
 
-> **Status note:** the real LRGB data is downloaded and all three PE caches are built and
-> verified; the probe, the calibration tool, and the GraphGPS + SAN training integrations
-> have been run against real graphs. GraphGPS's probe wrapper is wired; SAN's is not yet.
-> The orchestration bug that used to make a real grid run silently discard every metric
-> (train_fn was never called from `run_experiment.main()`; `launch.py` called it but threw
-> the result away) is fixed — see "Implementation status". No model has been trained to
-> completion here and `results/` is empty; there is no GPU in this environment, so every
-> number in the paper is still ahead of us.
-> Import paths for the not-yet-cloned Graphormer backend were checked by hand against its
-> documented API as of early 2026 — re-verify against the exact commit you clone, since
-> upstream repos drift.
+> **Status note:** this branch is SAN-only — the GraphGPS and Graphormer backend/adapter
+> modules have been removed here (see "Implementation status"); use `master`/`graphGPS`/
+> `graphormer` for those backbones. The real LRGB data is downloaded and all three PE
+> caches are built and verified; the SAN training integration and probe wrapper are both
+> wired and have been run against real graphs. The SAN arm is trained to completion —
+> 36/36 cells (4 PEs × 3 datasets × 3 seeds; SAN evaluates node-level encodings only, so
+> GRPE isn't part of its grid, see "The 5 PE variants") — with real results in
+> `results/san_*.json`. The orchestration bug that used to make a real grid run silently
+> discard every metric (train_fn was never called from `run_experiment.main()`;
+> `launch.py` called it but threw the result away) is fixed — see "Implementation status".
 
 ## Why this structure
 
@@ -24,7 +23,8 @@ The professor's comment was: don't let a PE's apparent effect be a GraphGPS-spec
 artifact, and don't let a dataset's result be a Peptides-func-specific artifact. So we now
 vary two axes independently:
 
-- **Backbone axis** (architecturally distinct, see `docs/rationale.docx` for the reasoning):
+- **Backbone axis** (architecturally distinct; the full reasoning was meant to live in
+  `docs/rationale.docx`, but that file has not been added to this repo):
   1. **GraphGPS** (hybrid MPNN + Transformer) — primary backbone, unchanged from the proposal.
   2. **SAN** (Spectral Attention Network) — full/sparse attention with a dedicated *learned*
      spectral PE module; no message-passing branch.
@@ -51,14 +51,13 @@ graphs-project/
 │   │   ├── compute_pe.py         <- backbone-agnostic PE computation (the shared "ground truth")
 │   │   └── cache.py              <- streaming writer + memory-mapped reader, versioned
 │   ├── adapters/
-│   │   ├── graphgps_adapter.py   <- maps PE tensors -> GraphGPS posenc_* config/format
-│   │   ├── san_adapter.py        <- maps PE tensors -> SAN's LPE input format
-│   │   └── graphormer_adapter.py <- maps PE tensors -> Graphormer spatial_pos/edge_input/attn-bias
+│   │   └── san_adapter.py        <- maps PE tensors -> SAN's LPE input format
+│   │                                (graphgps_adapter.py / graphormer_adapter.py removed;
+│   │                                this branch is SAN-only, see "Implementation status")
 │   ├── backends/
-│   │   ├── graphgps_backend.py   <- REAL integration: drives GraphGPS's own train loop, and
-│   │   │                            wraps a trained GPSModel for the Jacobian probe
-│   │   └── san_backend.py        <- REAL integration: drives SAN's own model classes (DGL) for
-│   │                                training; probe wrapper is a stub, see its own docstring
+│   │   └── san_backend.py        <- REAL integration: drives SAN's own model classes (DGL)
+│   │                                for training; probe wrapper is also real, wired code
+│   │                                (graphgps_backend.py removed, see "Implementation status")
 │   ├── config.py                 <- run schema (backbone x pe x dataset x seed) + version locking
 │   ├── dataset_meta.py           <- per-dataset caps, ρ windows, GRPE bucketing
 │   ├── calibration.py            <- target-node budget sweep + decision rule
@@ -70,7 +69,8 @@ graphs-project/
 ├── configs/
 │   ├── README.md                 <- which of these three directories code ACTUALLY reads
 │   ├── graphgps/                 <- 15 YAML files, decorative (see configs/README.md)
-│   ├── san/                      <- 15 JSON configs, LIVE -- san_backend.py reads these
+│   ├── san/                      <- 12 JSON configs (4 PEs x 3 datasets, no GRPE), LIVE --
+│   │                                san_backend.py reads these
 │   └── graphormer/                <- 15 JSON configs, decorative (backend still a stub)
 ├── docs/
 │   └── analysis-plan.md          <- amended success criteria + pre-registered ρ windows.
@@ -82,7 +82,6 @@ graphs-project/
 │   ├── calibrate_target_nodes.py <- one-off convergence check for the probe's T
 │   ├── generate_san_configs.py   <- regenerates configs/san/*.json from san_backend.py's
 │   │                                own PE_SPEC/BASE_NET_PARAMS/TRAIN_PARAMS
-│   ├── run_all.sh                <- superseded by launch.py; kept for reference
 │   ├── aggregate_results.py      <- Table 1 + figures; ρ is the primary statistic
 │   └── slurm/                    <- TAU CS cluster job scripts, see scripts/slurm/README.md
 ├── raw_data/                     <- gitignored, 5.2 GB. LRGB downloads; see setup step 4.
@@ -94,15 +93,18 @@ graphs-project/
 ## Implementation status
 
 The shared machinery — PE computation and cache, the sensitivity probe, calibration,
-aggregation, the launcher — is complete and tested. The per-backbone training integrations
-are the critical path; GraphGPS's is wired end to end, SAN's is now wired for training
-(probe not yet), Graphormer's remains a stub:
+aggregation, the launcher — is complete and tested. This branch is now SAN-only: the
+GraphGPS and Graphormer backend/adapter modules (`src/backends/graphgps_backend.py`,
+`src/adapters/graphgps_adapter.py`, `src/adapters/graphormer_adapter.py`) were removed
+here, though `src/run_experiment.py` still references them, so `--backbone gps` and
+`--backbone graphormer` are currently broken on this branch. Use `master`/`graphGPS`/
+`graphormer` for those backbones.
 
 | backbone | training | probe wrapper | notes |
 |---|---|---|---|
-| GraphGPS | **wired** (4 of 5 PEs) | **wired** | `src/backends/graphgps_backend.py`; GRPE refused, see below |
-| SAN | **wired** (4 PEs) | stub | `src/backends/san_backend.py` |
-| Graphormer | stub | stub | repo not cloned or forked yet |
+| GraphGPS | **removed from this branch** | **removed from this branch** | see `graphGPS` branch |
+| SAN | **wired** (4 PEs) | **wired** | `src/backends/san_backend.py` |
+| Graphormer | **removed from this branch** | **removed from this branch** | see `graphormer` branch |
 
 **Fixed this pass:** `run_experiment.py`'s `main()` had the line that calls `train_fn`
 commented out, and `launch.py`'s `run_one()` called the training entry point directly but
@@ -131,7 +133,9 @@ to — but not including — the task head and return node embeddings. All four 
 backbone lazily, so `--dry-run` and the whole test suite work on a machine with neither
 environment set up.
 
-Two things to know before trusting cross-PE numbers from either wired backbone:
+Two things to know before trusting cross-PE numbers (the first point describes GraphGPS,
+which is not part of this branch — see "Implementation status" — kept here since the
+`dim_inner`/content-width point below applies the same way to SAN):
 
 - **GRPE raises on GraphGPS.** GraphGPS has no native attention-bias hook; GRPE needs `GraphGPS's GPSLayer` self-attention replaced by `adapters.graphgps_adapter.GRPEBiasedAttention` and `spd_bucket`/`edge_type` tensors threaded onto the batch.
 - **The content width differs per PE, and this is not fixable in the probe.** GraphGPS holds
@@ -216,12 +220,9 @@ bash scripts/setup_upstream.sh          # clones your forks as siblings, adds an
 # Do NOT `git clone` upstream directly -- pre-flight rejects it (see "Version locking").
 # Status today: gps forked and pinned; san and graphormer still need forking.
 
-# 2. Create one env per backbone (their pinned dependency sets conflict with each other -
-#    GraphGPS wants PyG>=2.0 + torch 1.9-2.x, SAN pins an older PyG/DGL combo, Graphormer
-#    pins fairseq + its own CUDA ops). Do NOT try to share one env across all three.
-conda env create -f envs/graphgps_env.yml
+# 2. This branch is SAN-only (see "Implementation status"), so only SAN's env is needed
+#    (and only envs/san_env.yml exists here):
 conda env create -f envs/san_env.yml
-conda env create -f envs/graphormer_env.yml
 
 # 3. Pin the commit. setup_upstream.sh prints the exact line to paste into
 #    config.PINNED_COMMITS for any backbone that is cloned but not yet pinned.
@@ -313,7 +314,8 @@ and unreachable pairs.
 ## Compute budget reality check
 
 Full grid = 3 backbones × 5 PEs × 3 datasets × 3 seeds = **135 runs**. If that's not
-feasible before the deadline, the fallback (documented in `docs/rationale.docx`) is:
+feasible before the deadline, the fallback (`docs/rationale.docx` was meant to hold this,
+but has not been added to this repo) is:
 drop to 1 seed for the two new backbones and keep 3 seeds only for GraphGPS (the primary
 backbone), and/or drop PascalVOC-SP to a 20% node-subsampled variant for the SAN arm only
 (SAN's full attention is O(n²) and PascalVOC-SP graphs average ~480 nodes).

@@ -119,7 +119,7 @@ def make_model_fn(trained_model, backbone: str, data, pe_record=None):
         return make_gps_model_fn(trained_model, data)
     if backbone == "san":
         from backends.san_backend import make_san_model_fn
-        return make_san_model_fn(trained_model, data)   # raises NotImplementedError itself
+        return make_san_model_fn(trained_model, data)
     raise NotImplementedError(
         f"make_model_fn is implemented for 'gps' only; '{backbone}' still needs its repo "
         "cloned and forked. For Graphormer this is the last encoder layer's token states "
